@@ -13,17 +13,6 @@ import { record } from "./ledger.js";
 import { type Metered, type MeteredOptions, metered } from "./metered.js";
 import { CHEAPEST, type Provider, realAdapter } from "./providers.js";
 
-// Real agents must not depend on (or be broken by) the developer's own git configuration, and
-// they commit with a throwaway identity. The agents still use the developer's real login.
-const gitHome = mkdtempSync(join(tmpdir(), "preston-smoke-git-"));
-const gitConfig = join(gitHome, "gitconfig");
-writeFileSync(
-  gitConfig,
-  "[user]\n\tname = Smoke Test\n\temail = smoke@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n",
-);
-process.env.GIT_CONFIG_GLOBAL = gitConfig;
-process.env.GIT_CONFIG_NOSYSTEM = "1";
-
 const cleanups: (() => Promise<void> | void)[] = [];
 afterAll(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) {

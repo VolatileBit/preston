@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readLedger, summarize } from "./ledger.js";
@@ -26,6 +26,15 @@ export default function setup(): () => void {
   // A ledger for this run only; every test process inherits the path.
   const dir = mkdtempSync(join(tmpdir(), "preston-smoke-run-"));
   const ledger = join(dir, "ledger.jsonl");
+  // Real agents must not depend on (or be broken by) the developer's own git configuration, and
+  // they commit with a throwaway identity. The agents still use the developer's real login.
+  const gitConfig = join(dir, "gitconfig");
+  writeFileSync(
+    gitConfig,
+    "[user]\n\tname = Smoke Test\n\temail = smoke@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n",
+  );
+  process.env.GIT_CONFIG_GLOBAL = gitConfig;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
   process.env.PRESTON_SMOKE_LEDGER = ledger;
   process.env.PRESTON_SMOKE_CLI = join(outDir, "cli.js");
   return () => {
