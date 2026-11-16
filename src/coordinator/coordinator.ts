@@ -4,6 +4,7 @@ import type { Outbox } from "../channels/outbox.js";
 import type { ChannelKind } from "../channels/types.js";
 import { type Clock, isoNow, type Timer } from "../clock.js";
 import type { ConfigManager } from "../config/config.js";
+import type { Config } from "../config/schema.js";
 import type { GoalEvent } from "../goals/engine.js";
 import { signInHow } from "../goals/messages.js";
 import type { GoalStore } from "../goals/store.js";
@@ -19,7 +20,7 @@ import type { Questions } from "../questions/questions.js";
 import { COORDINATOR_OWNER, type QuotaMonitor } from "../quota/monitor.js";
 import type { Bucket } from "../quota/store.js";
 import { formatResetTime } from "../quota/time.js";
-import { type Db, transaction } from "../store/db.js";
+import { type Db, one, run, transaction } from "../store/db.js";
 import type { ProcessTracker } from "../supervisor/processes.js";
 import type { ModelCatalog } from "../workers/models.js";
 import { type Adapters, agentLabel } from "../workers/registry.js";
@@ -149,7 +150,11 @@ export class Coordinator {
     await this.queue;
   }
 
-  private async invoke(input: CoordinatorInput, probe: boolean): Promise<void> {
+  private async invoke(
+    input: CoordinatorInput,
+    probe: boolean,
+    afterFallback = false,
+  ): Promise<void> {
     if (this.stopping) return;
     const { config, questions, store, tokens, log, quota } = this.deps;
     if (input.kind === "message" && input.inboundId !== undefined) {
@@ -172,6 +177,7 @@ export class Coordinator {
 
     const replyTo = replyTarget(input);
     const settings = config.get().coordinator;
+    const settingsVersion = config.version();
     const primary = settings.agent;
     if (!primary || !this.deps.adapters.get(primary)) {
       this.answer(
@@ -211,10 +217,8 @@ export class Coordinator {
       approval,
     );
     // The configured model belongs to the primary agent; another agent uses its own defaults.
-    const { model, effort } = await this.deps.models.coordinator(
-      agent,
-      agent === primary ? settings : {},
-    );
+    const resolved = await this.deps.models.coordinator(agent, agent === primary ? settings : {});
+    const { model, effort } = resolved;
     mkdirSync(this.deps.workdir, { recursive: true });
     if (input.kind === "message" && input.inboundId !== undefined) {
       this.deps.inbox.started(input.inboundId);
@@ -286,9 +290,21 @@ export class Coordinator {
     // An interrupted invocation leaves its message in the inbox, to be replayed on restart.
     if (this.stopping) return;
 
+    if (
+      end?.type === "failed" &&
+      !afterFallback &&
+      agent === primary &&
+      isModelFailure(end.error) &&
+      (await this.fallBackToGoodSettings(agent, settings, end.error))
+    ) {
+      // Same input again, now with the settings that worked.
+      return this.invoke(input, probe, true);
+    }
+
     switch (end?.type) {
       case "completed":
         quota.progress(COORDINATOR_OWNER);
+        if (agent === primary && !resolved.note) this.recordGoodSettings(settingsVersion);
         this.answer(input, replyTo, end.finalText.trim());
         if (!replyTo && end.finalText.trim())
           log.debug("coordinator event reply not sent", { kind: input.kind });
@@ -333,6 +349,66 @@ export class Coordinator {
     }
     this.escalateUnhandled(input);
     this.finishEvent(input);
+  }
+
+  /** Remembers that the Coordinator answered with the settings of this config version. */
+  private recordGoodSettings(version: number): void {
+    const known = one<{ config_version: number }>(
+      this.deps.db,
+      "SELECT config_version FROM coordinator_good WHERE id = 1",
+    );
+    if (known?.config_version === version) return;
+    run(
+      this.deps.db,
+      `INSERT INTO coordinator_good (id, config_version, at) VALUES (1, :version, :at)
+       ON CONFLICT (id) DO UPDATE SET config_version = :version, at = :at`,
+      { version, at: isoNow(this.deps.clock) },
+    );
+  }
+
+  /**
+   * The configured model or effort does not work for this account: go back to the settings the
+   * Coordinator last answered with (or the defaults when there are none), tell the user once,
+   * and say whether the same input should be tried again.
+   */
+  private async fallBackToGoodSettings(
+    agent: AgentKind,
+    failed: Config["coordinator"],
+    error: string,
+  ): Promise<boolean> {
+    const { config, log } = this.deps;
+    if (!failed.model && !failed.effort) return false;
+    const goodVersion = one<{ config_version: number }>(
+      this.deps.db,
+      "SELECT config_version FROM coordinator_good WHERE id = 1",
+    )?.config_version;
+    const good = goodVersion ? config.at(goodVersion)?.coordinator : undefined;
+    const sameAsFailed = good && sameCoordinator(good, failed);
+    const target =
+      good && !sameAsFailed && good.agent && this.deps.adapters.get(good.agent)
+        ? good
+        : { agent: failed.agent };
+    const version = config.version();
+    config.transform(
+      (c) => ({ ...c, coordinator: target }),
+      `the Coordinator's model did not work, so I went back to ${good && target === good ? "the settings that worked" : "the defaults"}`,
+    );
+    log.warn("coordinator model failed; reverted", { error, version, goodVersion });
+    const was = [failed.model, failed.effort && `${failed.effort} effort`]
+      .filter(Boolean)
+      .join(", ");
+    const now =
+      target === good
+        ? [good.model ?? "its default model", good.effort && `${good.effort} effort`]
+            .filter(Boolean)
+            .join(", ")
+        : "its default model";
+    this.deps.outbox.broadcast({
+      kind: "notice",
+      text: `I couldn't think with ${was}: ${agentLabel(agent)} says it isn't available on your account. I've gone back to ${now}, so nothing is lost. Tell me if you'd like to try a different model.`,
+      dedupeKey: `coordinator-model:${version}`,
+    });
+    return true;
   }
 
   /** Another agent the user allowed Preston to balance onto, with quota headroom now. */
@@ -469,4 +545,25 @@ function replyTarget(input: CoordinatorInput): ReplyTarget | undefined {
     case "approval":
       return undefined;
   }
+}
+
+/**
+ * A failure that says the model (or its effort) is not available to this account, as Claude Code
+ * and Codex word it. Matched on their messages, never judged by a model.
+ */
+const MODEL_FAILURE = [
+  /issue with the selected model/i,
+  /\b(?:unknown|invalid|unsupported|unrecognized) (?:model|effort|reasoning effort)\b/i,
+  /\bmodel[_ ]?not[_ ]?found\b/i,
+  /\bmodel\b[^.\n]{0,80}\b(?:does not exist|doesn't exist|not found|not available|unavailable|not supported|isn't supported|may not exist)\b/i,
+  /\b(?:do not|don't|does not|doesn't) have access to (?:the )?(?:selected )?model\b/i,
+  /\beffort\b[^.\n]{0,60}\b(?:not supported|unsupported|invalid|not available)\b/i,
+];
+
+export function isModelFailure(error: string): boolean {
+  return MODEL_FAILURE.some((pattern) => pattern.test(error));
+}
+
+function sameCoordinator(a: Config["coordinator"], b: Config["coordinator"]): boolean {
+  return a.agent === b.agent && a.model === b.model && a.effort === b.effort;
 }

@@ -2,12 +2,13 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Clock } from "../clock.js";
 import { isoNow } from "../clock.js";
-import type { Goal, Run } from "../goals/store.js";
+import type { Goal } from "../goals/store.js";
 import type { Logger } from "../log.js";
 import { type Git, gitProblem } from "./git.js";
 import type { PrepareResult } from "./hooks.js";
-import { canonicalPath, projectSlug, slugify } from "./paths.js";
+import { canonicalPath, isInside, projectSlug, slugify } from "./paths.js";
 import { inspectProject, type ProjectInfo } from "./project.js";
+import { stageWork } from "./stage.js";
 import type { LandingStore, Workspace } from "./store.js";
 
 /** Windows rejects paths past 260 characters; leave room for files inside the worktree. */
@@ -40,10 +41,10 @@ export class Workspaces {
 
   constructor(private readonly deps: WorkspaceDeps) {}
 
-  prepare(goal: Goal, run: Run): PrepareResult | Promise<PrepareResult> {
+  prepare(goal: Goal): PrepareResult | Promise<PrepareResult> {
     const existing = this.deps.store.workspace(goal.id);
     if (existing?.mode === "in_place") return this.inPlace(goal, existing.workdir, existing.reason);
-    if (existing) return this.reuse(goal, run, existing);
+    if (existing) return this.reuse(goal, existing);
     // Most folders are not repositories: decide that without starting a process, so a turn for
     // them starts as promptly as it always did.
     if (!mayBeRepository(goal.projectPath)) return this.inPlace(goal, goal.projectPath, null);
@@ -67,7 +68,7 @@ export class Workspaces {
     if (!repo) return this.inPlace(goal, goal.projectPath, null);
     // A concurrent preparation may have finished while this one waited.
     const raced = store.workspace(goal.id);
-    if (raced) return this.reuse(goal, undefined, raced);
+    if (raced) return this.reuse(goal, raced);
 
     const problem = await this.check(goal, info);
     if (problem) return this.fallback(goal, problem);
@@ -221,7 +222,7 @@ export class Workspaces {
   }
 
   /** Reuses an existing working copy after a restart, re-attaching it if it went missing. */
-  private async reuse(goal: Goal, _run: Run | undefined, w: Workspace): Promise<PrepareResult> {
+  private async reuse(goal: Goal, w: Workspace): Promise<PrepareResult> {
     if (w.mode === "in_place") return this.inPlace(goal, w.workdir, w.reason);
     const { git, store } = this.deps;
     const path = w.worktreePath ?? "";
@@ -261,7 +262,74 @@ export class Workspaces {
     return this.ready(w);
   }
 
-  /** Removes a landed Goal's worktree and branch. The caller has already landed everything. */
+  /**
+   * Tidies the working copy of a Goal that has ended, never losing work. Nothing to lose (no
+   * unsaved changes, every commit already on the main branch): folder and branch are removed.
+   * Otherwise it is left alone until `retentionMs` after the Goal ended; then unsaved changes
+   * are saved as a commit on the Goal's branch, the folder is removed and the branch is kept.
+   * Only Preston's own branches and folders are ever touched.
+   */
+  async tidyEnded(
+    w: Workspace,
+    input: { endedAt: string | null; retentionMs: number },
+  ): Promise<"removed" | "archived" | "kept"> {
+    const { git, log } = this.deps;
+    const { repoRoot: root, worktreePath: path, branch, baseBranch: base } = w;
+    if (w.mode !== "worktree" || w.state !== "active" || !root || !path || !branch || !base) {
+      return "kept";
+    }
+    if (!branch.startsWith("preston/") || !isInside(this.deps.worktreesDir, path)) return "kept";
+    const unmerged = async () =>
+      (await git.branchExists(root, branch))
+        ? Number(
+            (await git.out(root, [
+              "rev-list",
+              "--count",
+              `refs/heads/${base}..refs/heads/${branch}`,
+            ])) ?? 1,
+          )
+        : 0;
+    const folder = existsSync(path);
+    const dirty = folder && (await git.dirty(path));
+    if (!dirty && (await unmerged()) === 0) {
+      await this.cleanup(w, { deleteBranch: true });
+      return "removed";
+    }
+    const expired =
+      input.endedAt !== null &&
+      this.deps.clock.now() - Date.parse(input.endedAt) >= input.retentionMs;
+    if (!expired) return "kept";
+    if (dirty && !(await this.snapshot(path))) {
+      log.warn("could not save a finished Goal's unsaved work, so its folder stays", {
+        goalId: w.goalId,
+      });
+      return "kept";
+    }
+    const keep = (await unmerged()) > 0;
+    await this.cleanup(w, { deleteBranch: !keep });
+    return keep ? "archived" : "removed";
+  }
+
+  /** Saves unsaved changes as a commit on the worktree's branch (hooks are not run). */
+  private async snapshot(path: string): Promise<boolean> {
+    const { git } = this.deps;
+    const staged = await stageWork(git, path);
+    if (staged.problem) return false;
+    if (await git.ok(path, ["diff", "--cached", "--quiet"])) return true;
+    const committed = await git.run(path, [
+      ...(await git.identityArgs(path)),
+      "commit",
+      "--no-verify",
+      "-m",
+      "Unfinished work saved by Preston",
+    ]);
+    return committed.code === 0;
+  }
+
+  /**
+   * Removes a Goal's worktree folder. With `deleteBranch` the branch goes too (the caller has
+   * landed everything); without, the branch stays and the working copy is recorded as archived.
+   */
   async cleanup(w: Workspace, options: { deleteBranch: boolean }): Promise<void> {
     if (w.mode !== "worktree" || !w.repoRoot || !w.worktreePath || !w.branch) return;
     const { git, store, log } = this.deps;
@@ -288,7 +356,7 @@ export class Workspaces {
           log.warn("could not delete branch", { branch: w.branch, problem: gitProblem(deleted) });
         }
       }
-      store.setWorkspaceState(w.goalId, "removed");
+      store.setWorkspaceState(w.goalId, options.deleteBranch ? "removed" : "archived");
     });
   }
 

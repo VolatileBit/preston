@@ -1,7 +1,7 @@
-import { spawn as nodeSpawn } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { spawnTree } from "../../util/process-tree.js";
 
 /** The subset of a child process the Codex adapter relies on. Tests substitute a fake. */
 export interface CodexChild {
@@ -38,32 +38,19 @@ export interface ResolvedExecutable {
 
 const isWindows = process.platform === "win32";
 
-/** Spawns with pipes and, on Windows, kills the whole process tree on a forced kill. */
-export const defaultSpawn: CodexSpawn = (command, args, options) => {
+/**
+ * Spawns with pipes. Stopping the child stops everything it started: its process group on Unix,
+ * the whole tree on Windows (a .cmd shim runs codex as a grandchild).
+ */
+export const defaultSpawn: CodexSpawn = (command, args, options) =>
   // With a shell, Node joins command and args unquoted, so quote the path (e.g. under Program Files).
-  const child = nodeSpawn(options.shell ? `"${command}"` : command, [...args], {
+  spawnTree(options.shell ? `"${command}"` : command, args, {
     cwd: options.cwd,
     env: options.env,
     shell: options.shell,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
-  });
-  if (isWindows) {
-    const kill = child.kill.bind(child);
-    child.kill = (signal?: NodeJS.Signals | number) => {
-      if (signal === "SIGKILL" && child.pid !== undefined) {
-        // A .cmd shim runs codex as a grandchild; taskkill /T takes the whole tree down.
-        nodeSpawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-          stdio: "ignore",
-          windowsHide: true,
-        }).on("error", () => kill(signal));
-        return true;
-      }
-      return kill(signal);
-    };
-  }
-  return child as CodexChild;
-};
+  }) as unknown as CodexChild;
 
 function isExecutableFile(candidate: string): boolean {
   try {

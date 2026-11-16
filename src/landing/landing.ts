@@ -1,10 +1,10 @@
 import { join } from "node:path";
-import { type Clock, isoNow, sleep } from "../clock.js";
+import { type Clock, isoNow, sleep, type Timer } from "../clock.js";
 import type { ConfigManager } from "../config/config.js";
 import type { Config } from "../config/schema.js";
 import { runCheck } from "../goals/checks.js";
 import { failedChecksEvidence } from "../goals/messages.js";
-import type { Goal, GoalStore, Run } from "../goals/store.js";
+import { type Goal, type GoalStore, type Run, TERMINAL_GOAL_STATES } from "../goals/store.js";
 import { errorMessage, type Logger } from "../log.js";
 import type { Questions } from "../questions/questions.js";
 import { type Db, recordEvent, transaction } from "../store/db.js";
@@ -22,6 +22,7 @@ import {
   inPlaceNote,
   landedLocally,
   landedOnGitHub,
+  leftOutNote,
   mergeCommitMessage,
   nothingToLand,
   parseYesNo,
@@ -38,6 +39,7 @@ import {
   type PublishingVerdict,
   type RepoSnapshot,
 } from "./publishing.js";
+import { stageWork } from "./stage.js";
 import { LandingStore, type Workspace } from "./store.js";
 import { Workspaces } from "./workspace.js";
 
@@ -52,6 +54,8 @@ export interface LandingDeps {
   worktreesDir: string;
   github: GitHubClient;
   exec?: Exec;
+  /** Typed flags from the standing orders that apply to a Goal. */
+  policy(goal: Goal): { autoMergePublishing: boolean };
 }
 
 /** A Goal's worktree, with the fields landing relies on. */
@@ -77,6 +81,8 @@ type Integrated = { result: LandResult } | { baseTip: string; head: string };
 const MAX_ATTEMPTS = 3;
 /** Times the work is combined with a main branch that kept moving. */
 const MAX_PASSES = 3;
+/** How often the working copies of ended Goals are looked at. */
+const SWEEP_INTERVAL_MS = 60 * 60_000;
 
 /**
  * Lands a verified Goal's work: commits what the Worker left, combines it with the latest main
@@ -91,6 +97,9 @@ export class Landing implements LandingHooks {
   readonly git: Git;
   readonly workspaces: Workspaces;
   private aborts = new Map<string, AbortController>();
+  private sweepTimer: Timer | undefined;
+  private sweeping: Promise<void> = Promise.resolve();
+  private stopped = true;
 
   constructor(private readonly deps: LandingDeps) {
     this.store = new LandingStore(deps.db, deps.clock);
@@ -105,10 +114,54 @@ export class Landing implements LandingHooks {
     });
   }
 
+  /** Starts tidying the working copies of ended Goals: now, and then every hour. */
+  start(): void {
+    this.stopped = false;
+    this.scheduleSweep(0);
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.sweepTimer?.cancel();
+    await this.sweeping;
+  }
+
+  private scheduleSweep(delayMs: number): void {
+    this.sweepTimer = this.deps.clock.setTimeout(() => {
+      if (this.stopped) return;
+      this.sweeping = this.sweep()
+        .catch((err) => this.deps.log.error("tidying working copies failed", { error: err }))
+        .finally(() => {
+          if (!this.stopped) this.scheduleSweep(SWEEP_INTERVAL_MS);
+        });
+    }, delayMs);
+  }
+
+  /**
+   * Removes the working copies of Goals that ended: at once when nothing would be lost, after
+   * `landing.worktreeRetentionMs` otherwise (keeping the branch). See `Workspaces.tidyEnded`.
+   */
+  async sweep(): Promise<void> {
+    const retentionMs = this.deps.config.get().landing.worktreeRetentionMs;
+    for (const ws of this.store.activeWorktrees()) {
+      if (this.stopped) return;
+      const goal = this.deps.goals.findGoal(ws.goalId);
+      if (!goal || !TERMINAL_GOAL_STATES.includes(goal.state) || this.aborts.has(goal.id)) continue;
+      try {
+        const result = await this.workspaces.tidyEnded(ws, { endedAt: goal.endedAt, retentionMs });
+        if (result !== "kept") {
+          this.deps.log.info("tidied a working copy", { goalId: goal.id, result });
+        }
+      } catch (err) {
+        this.deps.log.warn("could not tidy a working copy", { goalId: goal.id, error: err });
+      }
+    }
+  }
+
   // ---- Hooks for the Goal engine -----------------------------------------------------------
 
-  prepare(goal: Goal, run: Run): PrepareResult | Promise<PrepareResult> {
-    return this.workspaces.prepare(goal, run);
+  prepare(goal: Goal): PrepareResult | Promise<PrepareResult> {
+    return this.workspaces.prepare(goal);
   }
 
   usesWorktree(goalId: string): boolean {
@@ -131,6 +184,39 @@ export class Landing implements LandingHooks {
     if (ws.mode === "in_place") return ws.reason ? inPlaceNote(ws.reason) : undefined;
     if (ws.state === "active" && ws.branch) return unlandedNote(ws.branch, ws.worktreePath);
     return undefined;
+  }
+
+  async prepareReland(goal: Goal): Promise<string | undefined> {
+    const ws = this.store.workspace(goal.id);
+    const record = this.store.landing(goal.id);
+    if (ws?.mode !== "worktree" || !isTree(ws)) {
+      return "That work was done directly in the project folder, so there is nothing separate to merge.";
+    }
+    if (record?.result?.kind === "landed" || ws.state === "removed") {
+      return "That work is already merged.";
+    }
+    if (record?.result?.kind !== "held" && record?.result?.kind !== "blocked") {
+      return "Preston only merges work it has verified itself, and this was never verified. Start a follow-up Goal to finish it.";
+    }
+    if (!(await this.git.branchExists(ws.repoRoot, ws.branch))) {
+      return `The branch ${ws.branch} that held the finished work is gone, so there is nothing left to merge.`;
+    }
+    const prepared = await this.workspaces.prepare(goal);
+    return prepared.ok ? undefined : prepared.reason;
+  }
+
+  resetForReland(goalId: string, options: { allowPublishing: boolean }): void {
+    const record = this.store.ensureLanding(goalId);
+    this.store.updateLanding(goalId, {
+      state: "active",
+      result: null,
+      fixAttempts: 0,
+      ciStartedAt: null,
+      questionId: null,
+      publishing: null,
+      decision: options.allowPublishing ? "yes" : null,
+      ...(record.prNumber ? {} : { mode: null }),
+    });
   }
 
   abort(goalId?: string): void {
@@ -164,7 +250,7 @@ export class Landing implements LandingHooks {
     try {
       for (let attempt = 1; ; attempt++) {
         try {
-          return this.settle(goal.id, await this.execute(ctx));
+          return this.settle(goal.id, this.withLeftOut(ctx, await this.execute(ctx)));
         } catch (err) {
           if (controller.signal.aborted) return { kind: "aborted" };
           this.deps.log.warn("landing step failed", { goalId: goal.id, attempt, error: err });
@@ -224,8 +310,9 @@ export class Landing implements LandingHooks {
     const { git } = this;
     const path = ctx.ws.worktreePath;
     if (!(await git.dirty(path))) return undefined;
-    const added = await git.run(path, ["add", "-A"]);
-    if (added.code !== 0) return gitProblem(added);
+    const staged = await stageWork(git, path);
+    if (staged.problem) return staged.problem;
+    this.store.updateLanding(ctx.goal.id, { leftOut: staged.leftOut });
     // Exit 0 means nothing is staged (only ignored files changed).
     if (await git.ok(path, ["diff", "--cached", "--quiet"])) return undefined;
     const identity = await git.identityArgs(path);
@@ -236,6 +323,25 @@ export class Landing implements LandingHooks {
       commitMessage(ctx.goal.brief),
     ]);
     return committed.code === 0 ? undefined : gitProblem(committed);
+  }
+
+  /** Tells the user what was not committed, in the outcome of work that was merged or held. */
+  private withLeftOut(ctx: Ctx, result: LandResult): LandResult {
+    if (result.kind !== "landed" && result.kind !== "held") return result;
+    const leftOut = this.require(ctx).leftOut;
+    if (!leftOut.length) return result;
+    const note = leftOutNote(leftOut, this.keepsFolder(ctx) ? ctx.ws.worktreePath : null);
+    return { ...result, message: [result.message, note].filter(Boolean).join("\n") };
+  }
+
+  /** A large file was left out of the merge: its folder is kept, so the file is not lost. */
+  private keepsFolder(ctx: Ctx): boolean {
+    return this.require(ctx).leftOut.some((l) => l.why === "large_binary");
+  }
+
+  /** Removes the Goal's worktree and branch once everything in them is merged. */
+  private async tidy(ctx: Ctx): Promise<void> {
+    if (!this.keepsFolder(ctx)) await this.workspaces.cleanup(ctx.ws, { deleteBranch: true });
   }
 
   /** Pull request when the repository has a usable GitHub remote, otherwise a local merge. */
@@ -362,7 +468,7 @@ export class Landing implements LandingHooks {
     note: string | null,
   ): Promise<LandResult> {
     const currentBranch = await this.git.currentBranch(ctx.ws.repoRoot);
-    await this.workspaces.cleanup(ctx.ws, { deleteBranch: true });
+    await this.tidy(ctx);
     return {
       kind: "landed",
       message: landedLocally({ base: ctx.ws.baseBranch, checkout, currentBranch, note }),
@@ -522,7 +628,7 @@ export class Landing implements LandingHooks {
     if (fetched.code === 0) local = await this.catchUp(root, remote, base);
     // Best effort: the remote copy of the branch is done with.
     await git.run(root, ["push", remote, "--delete", branch], { timeoutMs: 120_000 });
-    await this.workspaces.cleanup(ctx.ws, { deleteBranch: true });
+    await this.tidy(ctx);
     return { kind: "landed", message: landedOnGitHub({ url: pr.url, base, local }) };
   }
 
@@ -598,7 +704,7 @@ export class Landing implements LandingHooks {
     }
     const head = (await git.rev(path, "HEAD")) ?? "";
     if ((await git.out(root, ["rev-list", "--count", `${baseTip}..${head}`])) === "0") {
-      await this.workspaces.cleanup(ctx.ws, { deleteBranch: true });
+      await this.tidy(ctx);
       return { result: { kind: "landed", message: nothingToLand(base) } };
     }
     if (
@@ -662,7 +768,9 @@ export class Landing implements LandingHooks {
     integrated: { baseTip: string; head: string },
     prUrl: string | null,
   ): Promise<LandResult | undefined> {
-    if (ctx.cfg.autoMergePublishing) return undefined;
+    if (ctx.cfg.autoMergePublishing || this.deps.policy(ctx.goal).autoMergePublishing) {
+      return undefined;
+    }
     const { questions } = this.deps;
     const held = (): LandResult => ({
       kind: "held",

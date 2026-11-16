@@ -46,6 +46,8 @@ export class Outbox {
     private readonly clock: Clock,
     private readonly log: Logger,
     private readonly settings: () => Config["outbox"],
+    /** Masks secrets in every message before it is stored or sent (never echo a token). */
+    private readonly redact: (text: string) => string = (text) => text,
   ) {
     hub.onConnected(() => this.kick());
   }
@@ -73,7 +75,7 @@ export class Outbox {
         channel: item.channel,
         conversation: item.conversationId ?? null,
         kind: item.kind,
-        text: item.text,
+        text: this.redact(item.text),
         replyTo: item.replyTo ?? null,
         goal: item.goalId ?? null,
         question: item.questionId ?? null,

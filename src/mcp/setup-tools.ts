@@ -11,6 +11,7 @@ import type { Pairings } from "../setup/pairing.js";
 import type { ModelCatalog } from "../workers/models.js";
 import type { Adapters } from "../workers/registry.js";
 import type { QuotaReading } from "../workers/types.js";
+import { ownerTurnGuard } from "./owner-turn.js";
 import { ToolError, type ToolRegistry } from "./tools.js";
 
 export interface SetupToolDeps {
@@ -64,6 +65,8 @@ export function describeChannel(
 export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps): void {
   const { chat, hub, pairings, config, coordinator } = deps;
   const roles = ["coordinator"] as const;
+  // Connecting or replacing a chat account decides who can give Preston orders.
+  const requireOwnerTurn = ownerTurnGuard(coordinator);
 
   registry.add({
     name: "channel_status",
@@ -98,6 +101,7 @@ export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps):
         .describe("Credential name to the value the user pasted"),
     }),
     handler: async ({ kind, values }) => {
+      requireOwnerTurn();
       const spec = chat.spec(kind);
       const expected = Object.keys(spec.credentials);
       for (const value of Object.values(values)) deps.addSecret(value.trim());
@@ -152,6 +156,7 @@ export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps):
     roles,
     input: z.strictObject({ kind: kindSchema, cancel: z.boolean().default(false) }),
     handler: async ({ kind, cancel }) => {
+      requireOwnerTurn();
       const label = chat.spec(kind).label;
       if (cancel) {
         return pairings.cancel(kind)
@@ -174,6 +179,7 @@ export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps):
     roles,
     input: z.strictObject({ kind: kindSchema }),
     handler: async ({ kind }) => {
+      requireOwnerTurn();
       pairings.cancel(kind, "The Channel was removed.");
       await chat.remove(kind, `${chat.spec(kind).label} removed in chat`);
       return describeChannel(deps, kind);

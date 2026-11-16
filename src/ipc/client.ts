@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
+import { dirname } from "node:path";
+import { assertPrivateDir } from "./private-dir.js";
 import { RpcCallError, type RpcResponse, readMessages, writeMessage } from "./protocol.js";
 
 export type NotificationHandler = (method: string, params: unknown) => void;
@@ -40,6 +42,8 @@ export class IpcClient {
 
   /** Connects and authenticates with the token file's secret. */
   static async connect(endpoint: string, tokenFile: string): Promise<IpcClient> {
+    // Never hand the secret to a socket in a folder somebody else owns.
+    assertPrivateDir(dirname(endpoint));
     const token = readFileSync(tokenFile, "utf8").trim();
     const socket = await new Promise<Socket>((resolve, reject) => {
       const s = connect(endpoint);

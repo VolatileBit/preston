@@ -4,7 +4,7 @@ import type { ChatChannels } from "../channels/chat.js";
 import type { ChannelHub } from "../channels/hub.js";
 import { isChatChannelKind } from "../channels/registry.js";
 import { ConfigError, type ConfigManager, maskConfig } from "../config/config.js";
-import type { Config } from "../config/schema.js";
+import { type Config, workerSettings } from "../config/schema.js";
 import type { Coordinator } from "../coordinator/coordinator.js";
 import { briefSchema } from "../goals/brief.js";
 import type { GoalEngine, StrategyAction } from "../goals/engine.js";
@@ -15,6 +15,7 @@ import type { Questions } from "../questions/questions.js";
 import type { QuotaMonitor } from "../quota/monitor.js";
 import type { ModelCatalog } from "../workers/models.js";
 import { type Adapters, agentLabel } from "../workers/registry.js";
+import { ownerTurnGuard } from "./owner-turn.js";
 import { ToolError, type ToolRegistry } from "./tools.js";
 
 export interface CoordinatorToolDeps {
@@ -37,6 +38,9 @@ const goalId = z.string().min(1).describe("Goal ID, e.g. g-3f9a1c0b2d");
 export function registerCoordinatorTools(registry: ToolRegistry, deps: CoordinatorToolDeps): void {
   const { engine, store, questions, coordinator, config } = deps;
   const roles = ["coordinator"] as const;
+  // A Worker's question, a repository file or a non-owner must never be able to widen a Brief,
+  // start work or change settings, whatever the Coordinator is persuaded to try.
+  const requireOwnerTurn = ownerTurnGuard(coordinator);
 
   registry.add({
     name: "goal_create",
@@ -48,7 +52,9 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
       brief: briefSchema,
       parentGoalId: goalId.optional().describe("Set for a follow-up to a finished Goal"),
     }),
-    handler: ({ projectPath, brief, parentGoalId }) => {
+    handler: async ({ projectPath, brief, parentGoalId }) => {
+      requireOwnerTurn();
+      const agent = await engine.chooseAgent(projectPath);
       const invocation = coordinator.current();
       const replyTo = invocation?.replyTo;
       const input = invocation?.input;
@@ -56,6 +62,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
         projectPath,
         brief,
         parentGoalId,
+        agent,
         origin: replyTo
           ? { channel: replyTo.channel, conversationId: replyTo.conversationId }
           : undefined,
@@ -65,7 +72,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
             ? `message:${input.inboundId}`
             : undefined,
       });
-      return { goalId: goal.id, state: goal.state };
+      return { goalId: goal.id, state: goal.state, agent: agent.agent };
     },
   });
 
@@ -126,12 +133,37 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
   });
 
   registry.add({
+    name: "goal_land",
+    description:
+      "Try again to merge the verified work of a finished Goal that was not merged: the user said no to a question about publishing and has changed their mind, an overlap with their own edits has been sorted out, or the pull request's checks timed out. Only work Preston verified is ever merged; the same safety rules apply as the first time. Safe to repeat. Set allowPublishing to true only when the user's latest message says to go ahead even though the merge also publishes something; otherwise Preston asks that question again.",
+    roles,
+    input: z.strictObject({
+      goalId,
+      allowPublishing: z
+        .boolean()
+        .optional()
+        .describe("The user just said to merge even though it publishes something"),
+    }),
+    handler: async ({ goalId: id, allowPublishing }) => {
+      // Lifting the publishing question is the user's call, never a reaction to an event.
+      if (allowPublishing) requireOwnerTurn();
+      const { goal, note } = await engine.relandGoal(id, {
+        allowPublishing: allowPublishing === true,
+      });
+      return { ...summary(goal), note };
+    },
+  });
+
+  registry.add({
     name: "goal_update_brief",
     description:
       "Replace a running Goal's Brief (for example after the user corrects it). The Worker is told at its next turn boundary.",
     roles,
     input: z.strictObject({ goalId, brief: briefSchema }),
-    handler: ({ goalId: id, brief }) => summary(engine.updateBrief(id, brief)),
+    handler: ({ goalId: id, brief }) => {
+      requireOwnerTurn();
+      return summary(engine.updateBrief(id, brief));
+    },
   });
 
   registry.add({
@@ -250,6 +282,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
       reason: z.string().min(1).max(200).default("changed in chat"),
     }),
     handler: async ({ patch, reason }) => {
+      requireOwnerTurn();
       try {
         const next = config.preview(patch);
         const warnings = await checkChange(deps, config.get(), next);
@@ -282,6 +315,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
     roles,
     input: z.strictObject({ version: z.number().int().min(1) }),
     handler: ({ version }) => {
+      requireOwnerTurn();
       try {
         const result = config.rollback(version);
         return { version: result.version, config: maskConfig(result.config) };
@@ -364,13 +398,17 @@ async function checkChange(
   const workersChanged =
     !isDeepStrictEqual(current.workers, next.workers) ||
     !isDeepStrictEqual(current.agents.enabled, next.agents.enabled);
-  if (workersChanged && (next.workers.model || next.workers.effort)) {
+  if (workersChanged) {
     for (const agent of next.agents.enabled) {
-      const check = await deps.models.check(agent, next.workers.model, next.workers.effort);
+      const { model, effort } = workerSettings(next.workers, agent);
+      if (!model && !effort) continue;
+      const check = await deps.models.check(agent, model, effort);
       if (!check.ok) {
+        const own = agent === "claude" || agent === "codex" ? next.workers[agent] : undefined;
+        const general = (model && !own?.model) || (effort && !own?.effort);
         problems.push(
-          next.agents.enabled.length > 1
-            ? `${check.reason} The Worker model and effort apply to every agent Preston uses (${next.agents.enabled.map(agentLabel).join(" and ")}); leave them unset to use each agent's own default.`
+          general && next.agents.enabled.length > 1
+            ? `${check.reason} The Worker model and effort apply to every agent Preston uses (${next.agents.enabled.map(agentLabel).join(" and ")}) unless set for one agent (workers.claude or workers.codex); leave them unset to use each agent's own default.`
             : check.reason,
         );
         break;
@@ -400,6 +438,8 @@ function summary(goal: Goal) {
     description: describeGoalState(goal),
     detail: goal.detail,
     parentGoalId: goal.parentGoalId,
+    /** The agent the Goal started on and why Preston chose it. */
+    agentChoice: goal.agentChoice,
     createdAt: goal.createdAt,
     endedAt: goal.endedAt,
   };

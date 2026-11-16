@@ -11,13 +11,13 @@
  * the first `result` so the CLI exits once any background work is done. Preston never reads or
  * passes on the user's credentials: the CLI uses its own login.
  */
-import { spawn as nodeSpawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
+import { spawnTree } from "../../util/process-tree.js";
 import type {
   AgentDetection,
   QuotaReading,
@@ -57,7 +57,7 @@ export interface ClaudeAdapterOptions {
   executable?: string;
   /** Environment for the CLI; defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
-  /** Process launcher; defaults to `child_process.spawn`. Injected by tests. */
+  /** Process launcher; defaults to `spawnTree`, so stopping the agent stops its tools too. */
   spawn?: SpawnFn;
   /** Clock for event timestamps and reset-time parsing. */
   now?: () => Date;
@@ -78,7 +78,7 @@ const BASE_ARGS = [
 
 export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): WorkerAdapter {
   const env = opts.env ?? process.env;
-  const spawn: SpawnFn = opts.spawn ?? (nodeSpawn as unknown as SpawnFn);
+  const spawn: SpawnFn = opts.spawn ?? (spawnTree as unknown as SpawnFn);
   const now = opts.now ?? (() => new Date());
   const platform = opts.platform ?? process.platform;
   const graceMs = opts.interruptGraceMs ?? 5000;

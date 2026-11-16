@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
-import type { Git } from "./git.js";
+import { type Git, isPlainName } from "./git.js";
 import { canonicalPath, posix } from "./paths.js";
 
 export interface RepoInfo {
@@ -71,7 +71,8 @@ export async function inspectProject(git: Git, path: string, at: string): Promis
     "",
   );
   const headSha = (await git.rev(root, "HEAD")) ?? null;
-  const currentBranch = (await git.currentBranch(root)) ?? null;
+  const checkedOut = (await git.currentBranch(root)) ?? null;
+  const currentBranch = checkedOut && isPlainName(checkedOut) ? checkedOut : null;
   const remote = await findRemote(git, root);
   return {
     ...base,
@@ -108,15 +109,16 @@ async function defaultBranch(
   candidates.push(...COMMON_DEFAULTS);
   candidates.push(current ?? undefined);
   for (const name of candidates) {
-    if (name && (await git.branchExists(root, name))) return name;
+    if (name && isPlainName(name) && (await git.branchExists(root, name))) return name;
   }
   const only = await git.out(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
-  const names = only?.split(/\r?\n/).filter(Boolean) ?? [];
+  const names = only?.split(/\r?\n/).filter((n) => n && isPlainName(n)) ?? [];
   return names.length === 1 ? (names[0] ?? null) : null;
 }
 
 export async function findRemote(git: Git, root: string): Promise<RepoInfo["remote"]> {
-  const names = (await git.out(root, ["remote"]))?.split(/\r?\n/).filter(Boolean) ?? [];
+  const names =
+    (await git.out(root, ["remote"]))?.split(/\r?\n/).filter((n) => n && isPlainName(n)) ?? [];
   const name = names.includes("origin") ? "origin" : names[0];
   if (!name) return null;
   const url = (await git.out(root, ["remote", "get-url", name])) ?? "";

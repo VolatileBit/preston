@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -9,6 +8,7 @@ import { errorMessage } from "../../log.js";
 import { COORDINATOR_RUN_ID } from "../../mcp/names.js";
 import type { ToolClient } from "../../mcp/tools.js";
 import { AsyncQueue } from "../../util/async-queue.js";
+import { spawnTree } from "../../util/process-tree.js";
 import type { AdapterFactory } from "../registry.js";
 import type {
   AgentDetection,
@@ -67,10 +67,12 @@ export interface FakeTurn {
   /** Waits until interrupted (or the process dies). */
   stall(): Promise<never>;
   /**
-   * Starts a real, idle child process as this turn's agent process (`RunHandle.processId`).
-   * Interrupting the turn does not stop it, as if the daemon died before it could.
+   * Starts a real, idle child process as this turn's agent process (`RunHandle.processId`), in
+   * its own process group like a real agent. Interrupting the turn does not stop it, as if the
+   * daemon died before it could. With `grandchildPidFile` it also starts a tool of its own and
+   * writes that process's ID to the file.
    */
-  spawnChild(): number;
+  spawnChild(options?: { grandchildPidFile?: string }): number;
   exitUnexpectedly(code?: number): never;
   quotaBlocked(options?: { bucket?: string; kind?: QuotaKind; resetsAt?: string }): never;
   authError(detail?: string): never;
@@ -91,6 +93,16 @@ export interface FakeAdapter extends WorkerAdapter {
 }
 
 export class FakeToolError extends Error {}
+
+const IDLE_AGENT = "setInterval(() => {}, 1000)";
+/** An agent that has started a tool of its own and ignores polite requests to stop. */
+const AGENT_WITH_TOOL = `
+  const tool = require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(IDLE_AGENT)}], { stdio: "ignore" });
+  require("node:fs").writeFileSync(process.argv[1], String(tool.pid));
+  process.on("SIGTERM", () => {});
+  process.on("SIGINT", () => {});
+  setInterval(() => {}, 1000);
+`;
 
 type Ending =
   | { type: "exit"; code: number }
@@ -269,11 +281,12 @@ function startTurn(
         new Promise<never>((_, reject) =>
           abort.signal.addEventListener("abort", () => reject(abort.signal.reason), { once: true }),
         ),
-      spawnChild() {
-        const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-          stdio: "ignore",
-          windowsHide: true,
-        });
+      spawnChild({ grandchildPidFile } = {}) {
+        const child = spawnTree(
+          process.execPath,
+          grandchildPidFile ? ["-e", AGENT_WITH_TOOL, grandchildPidFile] : ["-e", IDLE_AGENT],
+          { stdio: "ignore", windowsHide: true },
+        );
         child.unref();
         childPid = child.pid;
         queue.push({ type: "activity", at: at(), kind: "spawned", toolRunning: false });

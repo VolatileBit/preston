@@ -7,7 +7,7 @@
  * error (-14) is treated as a lost login that needs a new QR scan, rather than a one-hour pause.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   Channel,
   ChannelCapabilities,
@@ -27,6 +27,7 @@ import {
   ILinkHttpError,
   type ILinkMessage,
   isAbortError,
+  MESSAGE_TYPE_BOT,
 } from "./api.js";
 import { systemClock, type WeChatClock } from "./clock.js";
 import { pairWithQrCode } from "./pairing.js";
@@ -338,8 +339,9 @@ class WeChatChannel implements Channel {
     let tokensChanged = false;
     for (const msg of res.msgs ?? []) {
       const sender = msg.from_user_id ?? "";
-      if (!sender) continue;
-      const key = messageKey(msg);
+      // Messages the bot itself sent are never orders, whoever they claim to be from.
+      if (!sender || msg.message_type === MESSAGE_TYPE_BOT) continue;
+      const key = messageKey(msg, sender);
       if (key !== undefined) {
         if (this.seen.has(key)) continue;
         this.remember(key);
@@ -508,8 +510,18 @@ class WeChatChannel implements Channel {
 }
 
 /** Stable identity for de-duplication and replies (reference: InboundJournal.accept). */
-function messageKey(msg: ILinkMessage): string | undefined {
+/**
+ * What identifies a message across redeliveries: the server's id, else (when it sent a sequence
+ * number or time) a digest of who sent it, when, and what it said, so a repeated message is
+ * not run twice.
+ */
+function messageKey(msg: ILinkMessage, sender: string): string | undefined {
   const id =
     msg.message_id?.trim() || msg.item_list?.map((i) => i.msg_id?.trim() ?? "").find(Boolean);
-  return id ? id : undefined;
+  if (id) return id;
+  if (msg.seq === undefined && msg.create_time_ms === undefined) return undefined;
+  const digest = createHash("sha256")
+    .update(JSON.stringify([sender, msg.seq, msg.create_time_ms, inboundText(msg)]))
+    .digest("hex");
+  return `digest:${digest.slice(0, 32)}`;
 }

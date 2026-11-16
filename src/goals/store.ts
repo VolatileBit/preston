@@ -4,6 +4,7 @@ import { type Clock, isoNow } from "../clock.js";
 import { all, type Db, one, run } from "../store/db.js";
 import { newId } from "../util/ids.js";
 import type { AgentKind } from "../workers/types.js";
+import type { AgentChoice } from "./agents.js";
 import { type Brief, briefSchema } from "./brief.js";
 import type { CheckResult } from "./checks.js";
 
@@ -68,6 +69,8 @@ export interface Goal {
   wakeAt: string | null;
   /** Tactics tried so far (stall recovery, strategy changes, agent handovers). */
   attempts: Attempt[];
+  /** The agent the Goal started on and why. */
+  agentChoice: AgentChoice | null;
   createdAt: string;
   updatedAt: string;
   endedAt: string | null;
@@ -135,6 +138,7 @@ interface GoalRow {
   origin_conversation: string | null;
   wake_at: string | null;
   attempts: string;
+  agent_choice: string | null;
   created_at: string;
   updated_at: string;
   ended_at: string | null;
@@ -194,15 +198,17 @@ export class GoalStore {
     parentGoalId?: string | undefined;
     origin?: Origin | undefined;
     sourceKey?: string | undefined;
+    agentChoice?: AgentChoice | undefined;
   }): Goal {
     const id = newId("g");
     const at = this.now();
     run(
       this.db,
-      `INSERT INTO goals (id, project_id, parent_goal_id, state, brief, origin_channel, origin_conversation, source_key, created_at, updated_at)
-       VALUES (:id, :project, :parent, 'queued', :brief, :channel, :conversation, :source, :at, :at)`,
+      `INSERT INTO goals (id, project_id, parent_goal_id, state, brief, origin_channel, origin_conversation, source_key, agent_choice, created_at, updated_at)
+       VALUES (:id, :project, :parent, 'queued', :brief, :channel, :conversation, :source, :choice, :at, :at)`,
       {
         source: input.sourceKey ?? null,
+        choice: input.agentChoice ? JSON.stringify(input.agentChoice) : null,
         id,
         project: input.projectId,
         parent: input.parentGoalId ?? null,
@@ -329,6 +335,16 @@ export class GoalStore {
     const found = this.findRun(id);
     if (!found) throw new Error(`Unknown run ${id}`);
     return found;
+  }
+
+  /** The agent that handled the Project's most recent Run, for stickiness. */
+  lastAgentForProject(path: string): AgentKind | undefined {
+    return one<{ agent: AgentKind }>(
+      this.db,
+      `SELECT r.agent FROM runs r JOIN goals g ON g.id = r.goal_id JOIN projects p ON p.id = g.project_id
+       WHERE p.path = :path ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`,
+      { path },
+    )?.agent;
   }
 
   /** The Goal's Run that has not ended, if any. */
@@ -510,6 +526,7 @@ function toGoal(row: GoalRow): Goal {
         : null,
     wakeAt: row.wake_at,
     attempts: JSON.parse(row.attempts) as Attempt[],
+    agentChoice: row.agent_choice ? (JSON.parse(row.agent_choice) as AgentChoice) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     endedAt: row.ended_at,

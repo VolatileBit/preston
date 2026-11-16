@@ -157,7 +157,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   });
   chat.init();
   const chatChannels = chat;
-  const outbox = new Outbox(db, hub, clock, log.child("outbox"), () => config.get().outbox);
+  const outbox = new Outbox(
+    db,
+    hub,
+    clock,
+    log.child("outbox"),
+    () => config.get().outbox,
+    (text) => redactor.redactOutgoing(text),
+  );
   const store = new GoalStore(db, clock);
   const questions = new Questions({
     db,
@@ -244,6 +251,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     if (approval) escalations.raise(approval);
     else coordinator.submit({ kind: "worker_question", questionId: question.id });
   };
+  const scheduleStore = new ScheduleStore(db, clock);
   const landing = new Landing({
     db,
     clock,
@@ -252,10 +260,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     goals: store,
     questions,
     worktreesDir: join(paths.root, "worktrees"),
+    policy: (goal) =>
+      standing.effectivePolicy({
+        projectPath: goal.projectPath,
+        scheduleId: scheduleStore.scheduleOfGoal(goal.id),
+      }).landing,
     github: options.landing?.github ?? createGhClient(options.landing?.exec),
     ...(options.landing?.exec ? { exec: options.landing.exec } : {}),
   });
-  const scheduleStore = new ScheduleStore(db, clock);
   const engine = new GoalEngine({
     db,
     store,
@@ -345,7 +357,17 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       const bucket = quota.activeBlock(agent);
       if (bucket) blocks.push({ label: agentLabel(agent), bucket });
     }
-    return statusText(store.listGoals({ finishedLimit: 5 }), questions.open(), blocks, clock.now());
+    const several = config.get().agents.enabled.length > 1;
+    return statusText(
+      store.listGoals({ finishedLimit: 5 }),
+      questions.open(),
+      blocks,
+      clock.now(),
+      (goal) => {
+        const agent = store.currentRun(goal.id)?.agent ?? goal.agentChoice?.agent;
+        return several && agent ? agentLabel(agent) : undefined;
+      },
+    );
   };
   const router = new Router({
     outbox,
@@ -420,6 +442,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       const orphans = await processes.reconcile();
       if (orphans) log.warn("terminated orphaned agent processes", { count: orphans });
       engine.recover();
+      landing.start();
       escalations.recover();
       quota.start();
       scheduler.start();
@@ -429,6 +452,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       log.info("preston stopping");
       quota.stop();
       await scheduler.stop();
+      await landing.stop();
       // Both mark themselves stopping synchronously, before parked waits are released.
       pairings.stop();
       const stopping = Promise.all([engine.stop(), coordinator.stop()]);

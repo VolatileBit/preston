@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -42,6 +42,8 @@ export function ensureHome(paths: HomePaths): void {
   for (const dir of [paths.root, paths.logs, paths.transcripts, paths.coordinator]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
+  // The modes above apply only to folders just created, and the home may predate them.
+  if (process.platform !== "win32") chmodSync(paths.root, 0o700);
 }
 
 // Unix socket paths are limited to about 104 bytes on macOS.
@@ -51,5 +53,7 @@ function ipcEndpoint(root: string): string {
   const id = createHash("sha256").update(root).digest("hex").slice(0, 16);
   if (process.platform === "win32") return `\\\\.\\pipe\\preston-${id}`;
   const inHome = join(root, "preston.sock");
-  return inHome.length <= MAX_SOCKET_PATH ? inHome : join(tmpdir(), `preston-${id}.sock`);
+  if (inHome.length <= MAX_SOCKET_PATH) return inHome;
+  // A shared temp folder gets a private folder of this user's own, never a bare socket path.
+  return join(tmpdir(), `preston-${process.getuid?.() ?? 0}`, `${id}.sock`);
 }

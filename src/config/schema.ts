@@ -30,7 +30,14 @@ export const configSchema = z.strictObject({
       ...modelSettings,
     })
     .prefault({}),
-  workers: z.strictObject(modelSettings).prefault({}),
+  workers: z
+    .strictObject({
+      ...modelSettings,
+      /** Settings for Workers on one agent; they win over the two above for that agent. */
+      claude: z.strictObject(modelSettings).optional(),
+      codex: z.strictObject(modelSettings).optional(),
+    })
+    .prefault({}),
   verification: z
     .strictObject({
       checkTimeoutMs: z.number().int().positive().default(600_000),
@@ -85,6 +92,8 @@ export const configSchema = z.strictObject({
       notifyAfterMs: ms(30 * MINUTE),
       /** A Goal moves to another agent with headroom only when its wait is longer than this. */
       switchAfterMs: ms(60 * MINUTE),
+      /** An agent whose metered quota is used up beyond this share has no headroom for new work. */
+      headroomPercent: z.number().min(1).max(100).default(90),
     })
     .prefault({}),
   supervision: z
@@ -114,6 +123,11 @@ export const configSchema = z.strictObject({
       ciStartGraceMs: z.number().int().min(0).default(90_000),
       /** Times the Worker is re-run to fix a merge conflict or a failure found while landing. */
       conflictFixAttempts: z.number().int().min(0).max(3).default(1),
+      /**
+       * How long the working copy of a Goal that ended without its work landing (cancelled,
+       * failed, blocked, held) is kept before its folder is removed. The branch always stays.
+       */
+      worktreeRetentionMs: ms(14 * 24 * 60 * MINUTE),
     })
     .prefault({}),
   outbox: z
@@ -162,6 +176,18 @@ export const configSchema = z.strictObject({
 });
 
 export type Config = z.infer<typeof configSchema>;
+
+/**
+ * The model and effort for a Worker on `agent`: that agent's own setting, else the general one,
+ * else unset (the user's own CLI configuration applies).
+ */
+export function workerSettings(
+  workers: Config["workers"],
+  agent: z.infer<typeof agentKindSchema>,
+): { model?: string | undefined; effort?: string | undefined } {
+  const own = agent === "claude" || agent === "codex" ? workers[agent] : undefined;
+  return { model: own?.model ?? workers.model, effort: own?.effort ?? workers.effort };
+}
 
 export function defaultConfig(): Config {
   return configSchema.parse({});

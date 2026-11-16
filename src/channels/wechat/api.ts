@@ -27,7 +27,7 @@ export const ILINK_PROTOCOL_VERSION = "3.0.0";
 const BOT_TYPE = "3";
 
 export const MessageItemType = { TEXT: 1, IMAGE: 2, VOICE: 3, FILE: 4, VIDEO: 5 } as const;
-const MESSAGE_TYPE_BOT = 2;
+export const MESSAGE_TYPE_BOT = 2;
 const MESSAGE_STATE_FINISH = 2;
 
 export interface ILinkMessageItem {

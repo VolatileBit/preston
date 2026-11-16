@@ -276,4 +276,16 @@ export const MIGRATIONS: readonly string[] = [
   `,
   // 5: Projects' inspected state, Goal working copies (worktrees) and landing of the work.
   LANDING_MIGRATION,
+  // 6: What landing left out of a commit (generated folders, large binary files).
+  `
+  ALTER TABLE landings ADD COLUMN left_out TEXT;
+  -- Which agent a new Goal went to, and why (JSON).
+  ALTER TABLE goals ADD COLUMN agent_choice TEXT;
+  -- The config version under which the Coordinator last answered successfully.
+  CREATE TABLE coordinator_good (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    config_version INTEGER NOT NULL,
+    at TEXT NOT NULL
+  );
+  `,
 ];

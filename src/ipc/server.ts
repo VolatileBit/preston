@@ -1,7 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
 import { chmodSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
+import { dirname } from "node:path";
 import { errorMessage, type Logger } from "../log.js";
+import { ensurePrivateDir } from "./private-dir.js";
 import {
   RPC_ERRORS,
   RpcCallError,
@@ -111,13 +113,22 @@ export async function startIpcServer(options: {
     );
   });
 
-  if (process.platform !== "win32") rmSync(endpoint, { force: true });
+  if (process.platform !== "win32") {
+    ensurePrivateDir(dirname(endpoint));
+    rmSync(endpoint, { force: true });
+  }
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(endpoint, () => {
-      server.off("error", reject);
-      resolve();
-    });
+    // The socket is created closed to everyone else, not narrowed afterwards.
+    const umask = process.platform === "win32" ? undefined : process.umask(0o077);
+    try {
+      server.listen(endpoint, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    } finally {
+      if (umask !== undefined) process.umask(umask);
+    }
   });
   if (process.platform !== "win32") chmodSync(endpoint, 0o600);
   server.on("error", (err) => log.error("ipc server error", { error: err }));

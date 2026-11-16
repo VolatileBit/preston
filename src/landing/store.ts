@@ -3,6 +3,7 @@ import { all, type Db, one, run } from "../store/db.js";
 import type { LandResult } from "./hooks.js";
 import type { ProjectInfo } from "./project.js";
 import type { PublishingVerdict } from "./publishing.js";
+import type { LeftOut } from "./stage.js";
 
 export interface Workspace {
   goalId: string;
@@ -17,7 +18,11 @@ export interface Workspace {
   baseSha: string | null;
   /** Why the work is in place although the Project is a repository. */
   reason: string | null;
-  state: "active" | "removed";
+  /**
+   * `active`: the folder exists. `archived`: the folder was removed to save space and the branch
+   * kept. `removed`: folder and branch are gone (the work landed or there was none).
+   */
+  state: "active" | "archived" | "removed";
 }
 
 export type LandingState = "active" | "awaiting_user" | "awaiting_worker" | "done";
@@ -36,6 +41,8 @@ export interface LandingRecord {
   ciStartedAt: string | null;
   candidateSha: string | null;
   mergedSha: string | null;
+  /** New files committed without: generated folders, large binary files. */
+  leftOut: LeftOut[];
   result: LandResult | null;
 }
 
@@ -66,6 +73,7 @@ interface LandingRow {
   ci_started_at: string | null;
   candidate_sha: string | null;
   merged_sha: string | null;
+  left_out: string | null;
   result: string | null;
 }
 
@@ -82,6 +90,7 @@ const LANDING_COLUMNS: Record<string, string> = {
   ciStartedAt: "ci_started_at",
   candidateSha: "candidate_sha",
   mergedSha: "merged_sha",
+  leftOut: "left_out",
   result: "result",
 };
 
@@ -183,6 +192,16 @@ export class LandingStore {
     );
   }
 
+  /** Working copies whose folders still exist. */
+  activeWorktrees(): Workspace[] {
+    return all<{ goal_id: string }>(
+      this.db,
+      "SELECT goal_id FROM goal_workspaces WHERE mode = 'worktree' AND state = 'active' ORDER BY created_at, rowid",
+    )
+      .map((r) => this.workspace(r.goal_id))
+      .filter((w): w is Workspace => w !== undefined);
+  }
+
   setWorkspaceState(goalId: string, state: Workspace["state"]): void {
     run(
       this.db,
@@ -220,18 +239,19 @@ export class LandingStore {
     goalId: string,
     patch: Partial<{
       state: LandingState;
-      mode: "pr" | "local";
+      mode: "pr" | "local" | null;
       modeNote: string | null;
       prNumber: number;
       prUrl: string;
-      questionId: string;
-      publishing: PublishingVerdict;
-      decision: "yes" | "no";
+      questionId: string | null;
+      publishing: PublishingVerdict | null;
+      decision: "yes" | "no" | null;
       fixAttempts: number;
       ciStartedAt: string | null;
       candidateSha: string;
       mergedSha: string;
-      result: LandResult;
+      leftOut: LeftOut[];
+      result: LandResult | null;
     }>,
   ): void {
     const sets = ["updated_at = :at"];
@@ -289,6 +309,7 @@ function toLanding(row: LandingRow): LandingRecord {
     ciStartedAt: row.ci_started_at,
     candidateSha: row.candidate_sha,
     mergedSha: row.merged_sha,
+    leftOut: row.left_out ? (JSON.parse(row.left_out) as LeftOut[]) : [],
     result: row.result ? (JSON.parse(row.result) as LandResult) : null,
   };
 }
