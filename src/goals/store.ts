@@ -357,6 +357,20 @@ export class GoalStore {
     return row ? toRun(row) : undefined;
   }
 
+  /** A Run on this agent has a turn executing, or is between turns of a Goal that is working. */
+  usesAgent(agent: AgentKind): boolean {
+    return (
+      one(
+        this.db,
+        `SELECT 1 AS used FROM runs r JOIN goals g ON g.id = r.goal_id
+         WHERE r.agent = :agent AND r.state != 'ended'
+           AND (r.state = 'active' OR g.state IN ('queued', 'running', 'verifying', 'recovering'))
+         LIMIT 1`,
+        { agent },
+      ) !== undefined
+    );
+  }
+
   /** Parked Runs waiting on a quota bucket whose Goal still waits for it, longest wait first. */
   waitingRuns(bucket: string): Run[] {
     return all<RunRow>(

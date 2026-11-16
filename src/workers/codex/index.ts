@@ -202,11 +202,17 @@ export function createCodexAdapter(opts: CodexAdapterOptions = {}): WorkerAdapte
           : run.timedOut
             ? "it timed out"
             : `exit code ${run.code}: ${tail(`${run.stdout}\n${run.stderr}`)}`;
-        return { updated: false, ...versions, detail: `codex update failed (${why})` };
+        return {
+          updated: false,
+          failed: true,
+          ...versions,
+          detail: `codex update failed (${why})`,
+        };
       }
       if (!toVersion) {
         return {
           updated: false,
+          failed: true,
           ...versions,
           detail: "codex update finished but `codex --version` no longer runs",
         };

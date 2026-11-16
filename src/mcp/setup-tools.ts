@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentUpdater } from "../agents/updater.js";
 import type { ChatChannels } from "../channels/chat.js";
 import type { ChannelHub } from "../channels/hub.js";
 import { CHAT_CHANNEL_KINDS, type ChatChannelKind } from "../channels/registry.js";
@@ -22,6 +23,8 @@ export interface SetupToolDeps {
   coordinator: Coordinator;
   adapters: Adapters;
   models: ModelCatalog;
+  /** Keeps the agent CLIs current; its line says what version each is and how that is going. */
+  updater: AgentUpdater;
   addSecret(secret: string): void;
 }
 
@@ -189,7 +192,7 @@ export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps):
   registry.add({
     name: "agents_status",
     description:
-      "The coding agents on this computer: installed, version, signed in, remaining quota where it can be read for free, and which model you (the Coordinator) think with.",
+      "The coding agents on this computer: installed, version, signed in, remaining quota where it can be read for free, how keeping the CLI up to date is going (cliUpdate; Preston updates the CLIs itself when nothing is using them, and agents.autoUpdate turns that off), and which model you (the Coordinator) think with.",
     roles,
     input: z.strictObject({}),
     handler: async () => {
@@ -218,6 +221,7 @@ export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps):
             version: detection.version,
             signedIn: detection.loggedIn,
             problem: detection.problem,
+            cliUpdate: deps.updater.line(agent),
             quota,
             modelNote: deps.models.note(agent),
           };
@@ -231,6 +235,7 @@ export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps):
           effort: current.coordinator.effort ?? "default",
         },
         balanceByQuota: current.agents.balanceByQuota,
+        autoUpdate: current.agents.autoUpdate,
       };
     },
   });

@@ -627,6 +627,8 @@ export class GoalEngine {
     let end: TurnEnd | undefined;
     let trackedPid: number | undefined;
     let tracking: Promise<void> = Promise.resolve();
+    const resumed = run.sessionId !== null;
+    let sessionStarted = false;
     try {
       const handle = adapter.startRun({
         runId,
@@ -657,6 +659,7 @@ export class GoalEngine {
         trackPid();
         this.watch.observe(runId, event);
         if (event.type === "started") {
+          sessionStarted = true;
           store.updateRun(runId, { sessionId: event.sessionId });
           store.recordSession(run.agent, event.sessionId, "worker", run.workdir);
         } else if (event.type === "message") {
@@ -687,10 +690,11 @@ export class GoalEngine {
       }
     }
     if (this.stopping) return;
-    this.afterTurn(runId, end);
+    this.afterTurn(runId, end, resumed && !sessionStarted);
   }
 
-  private afterTurn(runId: string, end: TurnEnd | undefined): void {
+  /** `resumeLost`: the turn tried to resume a native Session and never got one back. */
+  private afterTurn(runId: string, end: TurnEnd | undefined, resumeLost = false): void {
     const { store } = this.deps;
     const run = store.run(runId);
     const interruptedByPreston = this.interrupted.delete(runId);
@@ -730,6 +734,10 @@ export class GoalEngine {
     if (!waiting && run.waitingSince) store.updateRun(runId, { waitingSince: null });
     if (end?.type === "failed" && end.retryable && TRANSIENT_FAILURE.test(end.error)) {
       this.waitBriefly(goal, store.run(runId), end.error);
+      return;
+    }
+    if (resumeLost && (!end || end.type === "failed")) {
+      this.startNewSession(goal, run, end?.type === "failed" ? end.error : undefined);
       return;
     }
     switch (end?.type) {
@@ -798,6 +806,32 @@ export class GoalEngine {
       store.updateRun(run.id, { recoveries: run.recoveries + 1 });
     }
     this.resumeRun(run, fallback);
+  }
+
+  /**
+   * The Session cannot be resumed (typically because the agent's CLI was updated and cannot read
+   * it). The Goal does not fail: the same agent continues in a new Session from the Brief and a
+   * compact checkpoint, like a handover.
+   */
+  private startNewSession(goal: Goal, run: Run, error: string | undefined): void {
+    const label = agentLabel(run.agent);
+    this.deps.log.warn("session could not be resumed; starting a new one", {
+      runId: run.id,
+      agent: run.agent,
+      error,
+    });
+    this.replaceRun(goal, run, run.agent, {
+      tactic: "fresh_session",
+      reason: `the earlier ${label} session could not be resumed${error ? ` (${error})` : ""}`,
+      prompt: (brief) =>
+        handoverPrompt({
+          brief,
+          reason: "its session could not be picked up again, for example after an update",
+          previousAgent: `An earlier ${label} session`,
+          previousReport: run.report?.summary,
+          lastMessage: run.lastMessage ?? undefined,
+        }),
+    });
   }
 
   private recoverRun(goal: Goal, run: Run, reason: string): void {

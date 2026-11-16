@@ -1,3 +1,4 @@
+import { AGENT_CLI_MIGRATION } from "../agents/migration.js";
 import { LANDING_MIGRATION } from "../landing/migration.js";
 
 /**
@@ -288,4 +289,6 @@ export const MIGRATIONS: readonly string[] = [
     at TEXT NOT NULL
   );
   `,
+  // 7: Agent CLI versions and how keeping them current is going.
+  AGENT_CLI_MIGRATION,
 ];

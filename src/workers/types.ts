@@ -125,6 +125,10 @@ export interface UpdateResult {
   updated: boolean;
   fromVersion?: string;
   toVersion?: string;
+  /** The updater itself failed (as opposed to finding nothing newer). */
+  failed?: boolean;
+  /** The install is managed by something else (a package manager, an administrator). */
+  managedExternally?: boolean;
   detail: string;
 }
 

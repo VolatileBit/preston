@@ -22,6 +22,10 @@ export const configSchema = z.strictObject({
       enabled: z.array(agentKindSchema).default([]),
       /** With more than one agent: spread work across them by remaining quota. */
       balanceByQuota: z.boolean().default(false),
+      /** Keep the agent CLIs up to date (only ever while no Run is using that CLI). */
+      autoUpdate: z.boolean().default(true),
+      /** Base interval between update checks for each agent CLI (spread by jitter). */
+      updateIntervalMs: ms(24 * 60 * MINUTE),
     })
     .prefault({}),
   coordinator: z
