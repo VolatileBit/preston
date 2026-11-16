@@ -154,11 +154,21 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions = {}): WorkerAdap
         ...(after.version ? { toVersion: after.version } : {}),
       };
       if (after.problem) {
-        return { updated: false, ...fromTo, detail: `${after.problem} Updater output: ${output}` };
+        return {
+          updated: false,
+          failed: true,
+          ...fromTo,
+          detail: `${after.problem} Updater output: ${output}`,
+        };
       }
       if (result.code !== 0) {
         const why = result.error?.message ?? `exit code ${result.code}`;
-        return { updated: false, ...fromTo, detail: `claude update failed (${why}): ${output}` };
+        return {
+          updated: false,
+          failed: true,
+          ...fromTo,
+          detail: `claude update failed (${why}): ${output}`,
+        };
       }
       const updated = Boolean(before.version && after.version && before.version !== after.version);
       return {

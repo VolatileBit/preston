@@ -40,6 +40,8 @@ export interface ReplyTarget {
 export interface Invocation {
   input: CoordinatorInput;
   replyTo: ReplyTarget | undefined;
+  /** The agent whose CLI is serving this invocation. */
+  agent: AgentKind;
 }
 
 export interface CoordinatorDeps {
@@ -138,6 +140,11 @@ export class Coordinator {
     return this.active;
   }
 
+  /** The Coordinator is thinking on this agent's CLI right now. */
+  usesAgent(agent: AgentKind): boolean {
+    return this.active?.agent === agent;
+  }
+
   /** Resolves when every submitted invocation has finished. */
   idle(): Promise<void> {
     return this.queue;
@@ -154,6 +161,7 @@ export class Coordinator {
     input: CoordinatorInput,
     probe: boolean,
     afterFallback = false,
+    freshSession = false,
   ): Promise<void> {
     if (this.stopping) return;
     const { config, questions, store, tokens, log, quota } = this.deps;
@@ -205,7 +213,7 @@ export class Coordinator {
     if (!adapter) return;
 
     const token = tokens.mint({ role: "coordinator" });
-    const resumeSessionId = store.latestSession("coordinator", agent);
+    const resumeSessionId = freshSession ? undefined : store.latestSession("coordinator", agent);
     const prompt = renderInput(
       input,
       {
@@ -223,8 +231,9 @@ export class Coordinator {
     if (input.kind === "message" && input.inboundId !== undefined) {
       this.deps.inbox.started(input.inboundId);
     }
-    this.active = { input, replyTo };
+    this.active = { input, replyTo, agent };
     let end: TurnEnd | undefined;
+    let sessionStarted = false;
     let tracking: Promise<void> = Promise.resolve();
     try {
       const handle = adapter.startRun({
@@ -265,6 +274,7 @@ export class Coordinator {
       for await (const event of handle.events) {
         trackPid();
         if (event.type === "started") {
+          sessionStarted = true;
           store.recordSession(agent, event.sessionId, "coordinator", this.deps.workdir);
         } else if (event.type === "activity" || event.type === "message") {
           quota.progress(COORDINATOR_OWNER);
@@ -299,6 +309,16 @@ export class Coordinator {
     ) {
       // Same input again, now with the settings that worked.
       return this.invoke(input, probe, true);
+    }
+
+    // A Session that cannot be resumed (a newer CLI version cannot read it) is replaced by a new
+    // one; the Coordinator's memory, standing orders and the Goal list do not live in it.
+    if (resumeSessionId && !sessionStarted && (!end || end.type === "failed")) {
+      log.warn("coordinator session could not be resumed; starting a new one", {
+        agent,
+        error: end?.type === "failed" ? end.error : undefined,
+      });
+      return this.invoke(input, probe, afterFallback, true);
     }
 
     switch (end?.type) {

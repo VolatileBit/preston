@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type AgentCliState, AgentUpdater, type VersionChange } from "./agents/updater.js";
 import { ChatChannels } from "./channels/chat.js";
 import { ChannelHub, type HostNotifier } from "./channels/hub.js";
 import { Outbox } from "./channels/outbox.js";
@@ -48,7 +49,7 @@ import {
   agentLabel,
   BUILTIN_ADAPTERS,
 } from "./workers/registry.js";
-import type { McpLaunchSpec } from "./workers/types.js";
+import type { AgentKind, McpLaunchSpec } from "./workers/types.js";
 
 export interface RuntimeOptions {
   /** Preston's home directory (see `resolveHome`). */
@@ -99,6 +100,10 @@ export interface Runtime {
   runHealth(runId: string): RunHealth | undefined;
   /** Agent processes recorded for orphan cleanup after a crash. */
   trackedProcesses(): { pid: number; owner: string }[];
+  /** An agent CLI's recorded version and how its last update check went. */
+  cliState(agent: AgentKind): AgentCliState | undefined;
+  /** Version changes seen for an agent CLI, oldest first. */
+  cliVersionChanges(agent: AgentKind): VersionChange[];
   /** Standing orders, including the typed flags other modules read (`effectivePolicy`). */
   readonly standing: StandingOrders;
   readonly schedules: Scheduler;
@@ -251,6 +256,15 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     if (approval) escalations.raise(approval);
     else coordinator.submit({ kind: "worker_question", questionId: question.id });
   };
+  const updater = new AgentUpdater({
+    db,
+    clock,
+    log: log.child("updater"),
+    config,
+    adapters,
+    outbox,
+    busy: (agent) => store.usesAgent(agent) || coordinator.usesAgent(agent),
+  });
   const scheduleStore = new ScheduleStore(db, clock);
   const landing = new Landing({
     db,
@@ -349,6 +363,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     adapters,
     models,
     addSecret,
+    updater,
   });
 
   const status = () => {
@@ -367,6 +382,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         const agent = store.currentRun(goal.id)?.agent ?? goal.agentChoice?.agent;
         return several && agent ? agentLabel(agent) : undefined;
       },
+      updater.statusLines(),
     );
   };
   const router = new Router({
@@ -447,9 +463,12 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       quota.start();
       scheduler.start();
       coordinator.resume();
+      // After recovery: Runs recovered above count as using their CLI, so updates wait for them.
+      updater.start();
     },
     async stop() {
       log.info("preston stopping");
+      updater.stop();
       quota.stop();
       await scheduler.stop();
       await landing.stop();
@@ -473,6 +492,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     quota: () => quota.list(),
     runHealth: (runId) => engine.runHealth(runId),
     trackedProcesses: () => processes.tracked(),
+    cliState: (agent) => updater.state(agent),
+    cliVersionChanges: (agent) => updater.versionChanges(agent),
     standing,
     schedules: scheduler,
     memory,

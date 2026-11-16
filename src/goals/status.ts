@@ -71,6 +71,8 @@ export function statusText(
   now = Date.now(),
   /** The agent a Goal is on, named when the user has more than one. */
   agentOf: (goal: Goal) => string | undefined = () => undefined,
+  /** One short line per agent CLI: its version and how keeping it current is going. */
+  cliLines: string[] = [],
 ): string {
   const active = goals.filter((g) => !g.endedAt);
   const finished = goals.filter((g) => g.endedAt).slice(0, 5);
@@ -106,7 +108,10 @@ export function statusText(
       ].join("\n"),
     );
   }
-  return sections.length
+  const main = sections.length
     ? sections.join("\n\n")
     : "Nothing in progress. Tell me what you'd like done.";
+  return cliLines.length
+    ? `${main}\n\nAgent CLIs:\n${cliLines.map((l) => `- ${l}`).join("\n")}`
+    : main;
 }

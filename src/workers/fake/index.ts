@@ -17,6 +17,7 @@ import type {
   QuotaReading,
   RunHandle,
   StartRunInput,
+  UpdateResult,
   WorkerAdapter,
   WorkerEvent,
 } from "../types.js";
@@ -42,6 +43,13 @@ export interface FakeScenario {
   agent?: AgentKind;
   /** Enables a token-free `readQuota()` that returns these readings (asked on every call). */
   quota?: () => QuotaReading[] | Promise<QuotaReading[]>;
+  /** Gives the adapter an `update()` that returns (or throws) what this says, on every call. */
+  update?: () => UpdateResult | Promise<UpdateResult>;
+  /**
+   * A Session can only be resumed by the CLI version that started it (as real CLIs sometimes
+   * require): a resume after `detect()` reports another version fails without starting.
+   */
+  sessionsTieToVersion?: boolean;
 }
 
 /** Returns the turn's final text. Throwing ends the turn as an unexpected failure. */
@@ -90,6 +98,8 @@ export interface FakeAdapter extends WorkerAdapter {
   readonly calls: FakeCall[];
   /** How many times `readQuota()` was called. */
   readonly quotaReads: number;
+  /** How many times `update()` was called. */
+  readonly updates: number;
 }
 
 export class FakeToolError extends Error {}
@@ -117,6 +127,8 @@ class TurnEnding extends Error {
 }
 
 interface SessionFile {
+  /** The CLI version that started the Session (for `sessionsTieToVersion`). */
+  cliVersion?: string | undefined;
   turns: number;
   workdir: string;
   state: Record<string, unknown>;
@@ -132,21 +144,34 @@ export interface FakeAdapterOptions {
 export function createFakeAdapter(options: FakeAdapterOptions): FakeAdapter {
   const sessionsDir = join(options.home, "fake-agent", "sessions");
   const calls: FakeCall[] = [];
-  const { detection, quota } = options.scenario;
+  const { detection, quota, update } = options.scenario;
   let quotaReads = 0;
+  let updates = 0;
+  const detect = async (): Promise<AgentDetection> =>
+    (typeof detection === "function" ? detection() : detection) ?? {
+      installed: true,
+      version: "fake",
+      loggedIn: true,
+      path: "fake",
+    };
   return {
     agent: options.scenario.agent ?? "fake",
     calls,
     get quotaReads() {
       return quotaReads;
     },
-    detect: async () =>
-      (typeof detection === "function" ? detection() : detection) ?? {
-        installed: true,
-        version: "fake",
-        loggedIn: true,
-        path: "fake",
-      },
+    get updates() {
+      return updates;
+    },
+    detect,
+    ...(update
+      ? {
+          async update() {
+            updates++;
+            return update();
+          },
+        }
+      : {}),
     ...(quota
       ? {
           async readQuota() {
@@ -159,7 +184,10 @@ export function createFakeAdapter(options: FakeAdapterOptions): FakeAdapter {
       const sessionId = input.resumeSessionId ?? randomUUID();
       const role = input.runId === COORDINATOR_RUN_ID ? "coordinator" : "worker";
       calls.push({ role, input, sessionId });
-      return startTurn({ ...options, sessionsDir }, input, sessionId, role);
+      const version = options.scenario.sessionsTieToVersion
+        ? detect().then((d) => d.version ?? "")
+        : Promise.resolve(undefined);
+      return startTurn({ ...options, sessionsDir, version }, input, sessionId, role);
     },
   };
 }
@@ -183,7 +211,7 @@ export function fakeAdapterFactory(scenario: FakeScenario): {
 }
 
 function startTurn(
-  options: FakeAdapterOptions & { sessionsDir: string },
+  options: FakeAdapterOptions & { sessionsDir: string; version: Promise<string | undefined> },
   input: StartRunInput,
   sessionId: string,
   role: FakeTurn["role"],
@@ -209,8 +237,24 @@ function startTurn(
         return;
       }
       session = JSON.parse(readFileSync(sessionPath, "utf8")) as SessionFile;
+      const cliVersion = await options.version;
+      if (cliVersion !== undefined && session.cliVersion !== cliVersion) {
+        queue.push({
+          type: "failed",
+          at: at(),
+          error: `Session ${sessionId} was made by CLI version ${session.cliVersion} and cannot be resumed by ${cliVersion}`,
+          retryable: false,
+        });
+        queue.push({ type: "exited", at: at(), code: 1 });
+        return;
+      }
     } else {
-      session = { turns: 0, workdir: input.workdir, state: {} };
+      session = {
+        turns: 0,
+        workdir: input.workdir,
+        state: {},
+        cliVersion: await options.version,
+      };
     }
     session.turns += 1;
     const save = () => {
