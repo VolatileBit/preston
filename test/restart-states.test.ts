@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { ManualClock } from "../src/clock.js";
-import { fakeAdapterFactory } from "../src/workers/fake/index.js";
+import { type FakeScript, fakeAdapterFactory } from "../src/workers/fake/index.js";
 import {
   advanceUntil,
   brief,
@@ -125,39 +125,33 @@ describe("restarting Preston in each state of a Goal", () => {
     expect(q.owner.texts("outcome")).toHaveLength(1);
   });
 
-  test.each([
+  const blockedWorker: FakeScript = async (turn) => {
+    await turn.callTool("report_result", {
+      summary: "Cannot continue.",
+      blockers: ["I need the production password."],
+    });
+    return "Blocked.";
+  };
+  test.each<[string, FakeScript, string]>([
     ["verified", reportingWorker, "completed"],
-    [
-      "blocked",
-      async (turn: Parameters<typeof reportingWorker>[0]) => {
-        await turn.callTool("report_result", {
-          summary: "Cannot continue.",
-          blockers: ["I need the production password."],
-        });
-        return "Blocked.";
-      },
-      "blocked",
-    ],
-  ] as const)(
-    "after the Goal ended %s: nothing is reported or run again",
-    async (_name, worker, state) => {
-      const project = tempDir("project");
-      const p = await startPreston({
-        scenario: { coordinator: goalCreatingCoordinator(project, brief()), worker },
-      });
-      p.owner.receive("go");
-      const goal = await waitFor(finishedGoal(p.rt), { what: "goal to finish" });
-      expect(goal.state).toBe(state);
+    ["blocked", blockedWorker, "blocked"],
+  ])("after the Goal ended %s: nothing is reported or run again", async (_name, worker, state) => {
+    const project = tempDir("project");
+    const p = await startPreston({
+      scenario: { coordinator: goalCreatingCoordinator(project, brief()), worker },
+    });
+    p.owner.receive("go");
+    const goal = await waitFor(finishedGoal(p.rt), { what: "goal to finish" });
+    expect(goal.state).toBe(state);
 
-      const q = await p.restart();
-      await new Promise((resolve) => setTimeout(resolve, 300));
+    const q = await p.restart();
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
-      expect(q.rt.goal(goal.id)).toMatchObject({ state, outcome: goal.outcome });
-      expect(q.owner.texts("outcome")).toEqual([]);
-      expect(q.owner.texts("ack")).toEqual([]);
-      expect(workerTurns(q)).toHaveLength(0);
-    },
-  );
+    expect(q.rt.goal(goal.id)).toMatchObject({ state, outcome: goal.outcome });
+    expect(q.owner.texts("outcome")).toEqual([]);
+    expect(q.owner.texts("ack")).toEqual([]);
+    expect(workerTurns(q)).toHaveLength(0);
+  });
 
   test("after the user stopped it: it stays stopped", async () => {
     const project = tempDir("project");
