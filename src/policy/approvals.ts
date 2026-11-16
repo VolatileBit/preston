@@ -4,8 +4,9 @@ import { evaluate, type PolicyAction, type PolicyDecision, type PolicyScope } fr
 
 /**
  * Translates the agents' native approval requests into policy actions and the policy's
- * decision back into their native answers. Escalations are denied with a clear reason until a
- * Coordinator decision exists for them.
+ * decision back into their native answers. A Worker's escalations go to the Coordinator
+ * (`escalations.ts`); `decide` alone declines them, which is what the Coordinator's own
+ * requests get.
  */
 
 export interface ClaudePermissionInput {
@@ -65,7 +66,7 @@ export function nativeAction(request: ApprovalRequest): PolicyAction {
   }
 }
 
-/** The decision to give the agent right now. Escalations become denials with a clear reason. */
+/** The policy's decision on its own: escalations become denials with a clear reason. */
 export function decide(
   action: PolicyAction,
   scope: PolicyScope,

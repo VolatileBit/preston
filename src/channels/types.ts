@@ -54,6 +54,12 @@ export interface ChannelContext {
 export interface PairingIO {
   /** Show text to the user in the setup conversation (QR codes are rendered as text). */
   show(text: string): void;
+  /**
+   * Ask the user something in the setup conversation and wait for their next message there
+   * (e.g. the number WeChat shows on the phone). `secret` keeps the answer out of logs.
+   * Rejects when pairing is cancelled. Optional: a Channel must cope without it.
+   */
+  prompt?(question: string, opts?: { secret?: boolean }): Promise<string>;
   signal: AbortSignal;
 }
 

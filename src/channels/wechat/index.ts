@@ -16,6 +16,7 @@ import type {
   DeliveryResult,
   InboundMessage,
   OutboundMessage,
+  PairingIO,
   PairingResult,
 } from "../types.js";
 import {
@@ -28,11 +29,10 @@ import {
   isAbortError,
 } from "./api.js";
 import { systemClock, type WeChatClock } from "./clock.js";
-import { pairWithQrCode, type WeChatPairingIO } from "./pairing.js";
+import { pairWithQrCode } from "./pairing.js";
 import { chunkText, inboundText } from "./text.js";
 
 export type { WeChatClock } from "./clock.js";
-export type { WeChatPairingIO } from "./pairing.js";
 
 /**
  * Persisted WeChat Channel config. The core stores it; the Channel reports changes through
@@ -89,6 +89,15 @@ const PROACTIVE_LIMIT_ERROR =
   "so this one was not delivered.";
 
 const CAPABILITIES: ChannelCapabilities = { reactions: false, proactive: "windowed" };
+
+export const wechatSetupGuide = `Connecting WeChat takes a minute. You need WeChat on your phone, signed in to the account you want to talk to Preston from, with ClawBot available on it.
+
+1. Preston shows a QR code here.
+2. On your phone, open WeChat, tap "+" and then "Scan", and scan the code.
+3. Confirm the login on your phone. If WeChat shows a number, type it here when Preston asks.
+4. That's it: from then on, message the ClawBot in WeChat to talk to Preston.
+
+Only the WeChat account that scanned the code can give Preston instructions. WeChat only lets Preston send a few messages on its own until you write to it again, so anything that couldn't be delivered waits until you next ask. If WeChat ever ends the login, Preston tells you on this computer; run \`preston\` and scan a new code.`;
 
 export function createWeChatChannel(
   config: WeChatChannelConfig,
@@ -193,7 +202,7 @@ class WeChatChannel implements Channel {
       : { status: "delivered", ref: firstRef };
   }
 
-  async pair(io: WeChatPairingIO): Promise<PairingResult> {
+  async pair(io: PairingIO): Promise<PairingResult> {
     const outcome = await pairWithQrCode({
       client: this.client,
       clock: this.clock,

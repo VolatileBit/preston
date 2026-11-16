@@ -34,7 +34,9 @@ describe("config through chat", () => {
       await call(p, "config_update", {
         patch: {
           workers: { model: "opus" },
-          channels: { slack: { botToken: "xoxb-1234567890-abcdefghij" } },
+          channels: {
+            slack: { botToken: "xoxb-1234567890-abcdefghij", appToken: "xapp-1-A0123-4567-abcdef" },
+          },
         },
         reason: "user asked for a stronger model",
       }),

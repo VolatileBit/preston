@@ -17,17 +17,26 @@ export interface SetupState {
   needsAgents: boolean;
   complete: boolean;
   agents: SetupAgent[];
+  /** Setup left to do even when `complete` (for example a Channel that needs pairing again). */
+  unfinished: string[];
+}
+
+export interface SetupDeps {
+  config: ConfigManager;
+  adapters: Adapters;
+  coordinator: Coordinator;
+  /** Plain descriptions of chat Channels that are configured but not usable until paired. */
+  channelsNeedingPairing(): string[];
 }
 
 /**
  * Setup bootstrap. Choosing agents is deterministic (the Coordinator needs an agent to exist);
- * everything after that is a conversation with the Coordinator. Completion lives in config,
- * so running `preston` again resumes unfinished setup.
+ * everything after that is a conversation with the Coordinator. Progress lives in config
+ * (`agents`, `channels`, `setup.complete`), so running `preston` again resumes unfinished
+ * setup, including a Channel that needs pairing again after setup was completed.
  */
 export class Setup {
-  constructor(
-    private readonly deps: { config: ConfigManager; adapters: Adapters; coordinator: Coordinator },
-  ) {}
+  constructor(private readonly deps: SetupDeps) {}
 
   async state(): Promise<SetupState> {
     const config = this.deps.config.get();
@@ -42,6 +51,7 @@ export class Setup {
         version: detection.version,
         problem: detection.problem,
       })),
+      unfinished: this.deps.channelsNeedingPairing(),
     };
   }
 
@@ -68,11 +78,17 @@ export class Setup {
   /** Hands the terminal conversation to the Coordinator when setup is unfinished. */
   continue(options: { justChoseAgents: boolean }): boolean {
     const config = this.deps.config.get();
-    if (config.setup.complete) return false;
+    const unfinished = this.deps.channelsNeedingPairing();
+    if (config.setup.complete && unfinished.length === 0) return false;
     const chosen = config.agents.enabled.map(agentLabel).join(" and ");
-    const note = options.justChoseAgents
-      ? `Setup is not complete. The user just chose to use ${chosen}${config.agents.balanceByQuota ? ", balanced by remaining quota" : ""}. Welcome them briefly and continue setup.`
-      : "The user reopened Preston and setup is not complete yet. Pick up where it left off.";
+    const channels = unfinished.length
+      ? ` These Channels need attention: ${unfinished.join(" ")} Offer to pair them again (channel_pair).`
+      : "";
+    const note = config.setup.complete
+      ? `The user reopened Preston. Setup was finished, but something needs fixing.${channels}`
+      : options.justChoseAgents
+        ? `Setup is not complete. The user just chose to use ${chosen}${config.agents.balanceByQuota ? ", balanced by remaining quota" : ""}. Welcome them briefly and continue setup.${channels}`
+        : `The user reopened Preston and setup is not complete yet. Check channel_status and pick up where it left off.${channels}`;
     this.deps.coordinator.submit({
       kind: "setup",
       note,

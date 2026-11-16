@@ -51,13 +51,31 @@ export class ConfigManager {
   }
 
   update(patch: ConfigPatch, reason: string): { version: number; config: Config } {
-    const merged = mergePatch(this.current, patch);
-    const parsed = configSchema.safeParse(merged);
+    return this.commit(this.preview(patch), reason);
+  }
+
+  /** The validated config `patch` would produce, without saving it. Throws ConfigError. */
+  preview(patch: ConfigPatch): Config {
+    const parsed = configSchema.safeParse(mergePatch(this.current, patch));
     if (!parsed.success) throw new ConfigError(describeIssues(parsed.error));
-    if (isDeepStrictEqual(parsed.data, this.current)) {
+    return parsed.data;
+  }
+
+  /** Saves what `change` returns for a copy of the current config (to replace a whole section). */
+  transform(
+    change: (config: Config) => Config,
+    reason: string,
+  ): { version: number; config: Config } {
+    const parsed = configSchema.safeParse(change(this.get()));
+    if (!parsed.success) throw new ConfigError(describeIssues(parsed.error));
+    return this.commit(parsed.data, reason);
+  }
+
+  private commit(next: Config, reason: string): { version: number; config: Config } {
+    if (isDeepStrictEqual(next, this.current)) {
       return { version: this.latestVersion() ?? 0, config: this.get() };
     }
-    const version = this.save(parsed.data, reason);
+    const version = this.save(next, reason);
     return { version, config: this.get() };
   }
 
@@ -175,19 +193,28 @@ function describeIssues(error: { issues: { path: PropertyKey[]; message: string 
 
 const SECRET_KEY = /token|secret|password|apikey|api_key|key$/i;
 
-/** Every credential-looking string value in the config, for log masking. */
-export function configSecrets(value: unknown, key = ""): string[] {
-  if (Array.isArray(value)) return value.flatMap((v) => configSecrets(v, key));
-  if (isPlainObject(value)) return Object.entries(value).flatMap(([k, v]) => configSecrets(v, k));
-  return typeof value === "string" && SECRET_KEY.test(key) ? [value] : [];
+/**
+ * Every credential-looking string value in the config, for log masking. Everything under a
+ * credential-looking key counts, e.g. each value of `contextTokens: { <user>: <token> }`.
+ */
+export function configSecrets(value: unknown, key = "", secret = false): string[] {
+  const isSecret = secret || SECRET_KEY.test(key);
+  if (Array.isArray(value)) return value.flatMap((v) => configSecrets(v, key, isSecret));
+  if (isPlainObject(value)) {
+    return Object.entries(value).flatMap(([k, v]) => configSecrets(v, k, isSecret));
+  }
+  return typeof value === "string" && isSecret ? [value] : [];
 }
 
 /** A copy of the config safe to show an agent or a Channel: credential values are masked. */
-export function maskConfig(value: unknown, key = ""): unknown {
-  if (Array.isArray(value)) return value.map((v) => maskConfig(v));
+export function maskConfig(value: unknown, key = "", secret = false): unknown {
+  const isSecret = secret || SECRET_KEY.test(key);
+  if (Array.isArray(value)) return value.map((v) => maskConfig(v, key, isSecret));
   if (isPlainObject(value)) {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, maskConfig(v, k)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, maskConfig(v, k, isSecret)]),
+    );
   }
-  if (typeof value === "string" && SECRET_KEY.test(key)) return value ? "(set)" : "";
+  if (typeof value === "string" && isSecret) return value ? "(set)" : "";
   return value;
 }

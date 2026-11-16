@@ -20,7 +20,15 @@ npm i -g @polyweave/preston
 preston
 ```
 
-The first time, Preston finds the coding agents installed on your computer, asks which to use, and walks you through the rest of setup in conversation. After that, `preston` opens a conversation with Preston. Tell it what you want done. Press Ctrl+C to leave; Preston keeps working in the background. Run `preston` again to pick up where you left off.
+The first time, Preston finds the coding agents installed on your computer and asks which to use. Then it offers to connect a chat app, so you can talk to it away from this computer, and walks you through it step by step:
+
+- **Discord**: you create your own Discord bot and paste its token. You need a Discord server to add the bot to; you can create one for free.
+- **Slack**: Preston gives you a ready-made app manifest to paste into Slack's "Create an app" page, then asks for the two tokens Slack shows you.
+- **WeChat**: Preston shows a QR code; scan it with WeChat on your phone.
+
+Any of them, or none: the terminal always works. Each one is paired with your own account, and only you can give Preston instructions there.
+
+After that, `preston` opens a conversation with Preston. Tell it what you want done. Press Ctrl+C to leave; Preston keeps working in the background. Run `preston` again to pick up where you left off, including anything left unfinished, such as scanning a new WeChat code when WeChat ended Preston's login.
 
 You can always type `status`, `stop`, `pause` or `resume`. Preston answers these straight away, even when its own agent has run out of quota.
 

@@ -1,6 +1,9 @@
 import type { Clock } from "../clock.js";
 import type { Logger } from "../log.js";
 import type { ToolClient } from "../mcp/tools.js";
+import { type ClaudeAdapterOptions, createClaudeAdapter } from "./claude/index.js";
+import { type CodexAdapterOptions, createCodexAdapter } from "./codex/index.js";
+import { agentEnv } from "./env.js";
 import type { AgentDetection, AgentKind, WorkerAdapter } from "./types.js";
 
 /** What Preston hands an adapter factory when it builds the adapter. */
@@ -28,32 +31,38 @@ export function agentLabel(kind: AgentKind): string {
 /** The agents a user can choose during setup, in order of preference. */
 export const USER_AGENTS: readonly AgentKind[] = ["claude", "codex"];
 
-/**
- * The adapters Preston ships. The real Claude Code and Codex adapters plug in here:
- * replace each stub with `(ctx) => createClaudeAdapter({...})` from `./claude/index.js` and
- * `(ctx) => createCodexAdapter({...})` from `./codex/index.js`. The fake adapter is never part
- * of this list; it is only added through the test environment variable (see daemon).
- */
-export const BUILTIN_ADAPTERS: AdapterFactories = {
-  // TODO(claude adapter): return createClaudeAdapter(...) once src/workers/claude is integrated.
-  claude: () => notIntegrated("claude"),
-  // TODO(codex adapter): return createCodexAdapter(...) once src/workers/codex is integrated.
-  codex: () => notIntegrated("codex"),
-};
+export interface BuiltinAdapterOptions {
+  /** Environment the agent CLIs start from; defaults to Preston's own. Nested-session variables are removed. */
+  env?: NodeJS.ProcessEnv;
+  claude?: Omit<ClaudeAdapterOptions, "env" | "now">;
+  codex?: Omit<CodexAdapterOptions, "env" | "now">;
+}
 
-function notIntegrated(agent: AgentKind): WorkerAdapter {
-  const detection: AgentDetection = {
-    installed: false,
-    problem: `Preston's ${LABELS[agent]} support is not available in this build yet.`,
-  };
+/**
+ * The adapters Preston ships: the user's own Claude Code and Codex CLIs. Every process they
+ * start gets `agentEnv(...)`, so a daemon started from inside an agent session does not make
+ * its agents believe they are nested in it. The fake adapter is never part of this list; it is
+ * only added through the test environment variable (see daemon).
+ */
+export function builtinAdapters(options: BuiltinAdapterOptions = {}): AdapterFactories {
+  const now = (ctx: AdapterContext) => () => new Date(ctx.clock.now());
   return {
-    agent,
-    detect: async () => detection,
-    startRun: () => {
-      throw new Error(detection.problem);
-    },
+    claude: (ctx) =>
+      createClaudeAdapter({
+        ...options.claude,
+        env: agentEnv(options.env ?? process.env),
+        now: now(ctx),
+      }),
+    codex: (ctx) =>
+      createCodexAdapter({
+        ...options.codex,
+        env: agentEnv(options.env ?? process.env),
+        now: now(ctx),
+      }),
   };
 }
+
+export const BUILTIN_ADAPTERS: AdapterFactories = builtinAdapters();
 
 /** The adapters a runtime uses, built once from their factories. */
 export class Adapters {
