@@ -264,7 +264,11 @@ function nextCron(expression: string, timeZone: string, after: number): number |
 // ---- Triggers --------------------------------------------------------------------------------
 
 /** The first occurrence strictly after `after` (epoch ms), or undefined when there is none. */
-export function nextOccurrence(trigger: Trigger, timeZone: string, after: number): number | undefined {
+export function nextOccurrence(
+  trigger: Trigger,
+  timeZone: string,
+  after: number,
+): number | undefined {
   switch (trigger.kind) {
     case "once": {
       const at = Date.parse(trigger.at);
@@ -339,7 +343,9 @@ export function buildTrigger(
 ): Trigger {
   const given = [input.at, input.cron, input.every].filter((v) => v !== undefined);
   if (given.length !== 1) {
-    throw new CronError("Give exactly one of: at (one time), cron (a pattern) or every (a repeat).");
+    throw new CronError(
+      "Give exactly one of: at (one time), cron (a pattern) or every (a repeat).",
+    );
   }
   if (input.at !== undefined) {
     const at = parseInstant(input.at, timeZone);

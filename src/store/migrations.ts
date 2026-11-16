@@ -209,7 +209,7 @@ export const MIGRATIONS: readonly string[] = [
     UNIQUE (channel, ref)
   );
   CREATE INDEX inbound_by_state ON inbound_messages(state);
-  `,  // 4: Standing orders (versioned), schedules with their run keys, and the memory search index
+  `, // 4: Standing orders (versioned), schedules with their run keys, and the memory search index
   //    (the Markdown files are the source of truth; the FTS table is created in code when the
   //    SQLite build supports FTS5).
   `

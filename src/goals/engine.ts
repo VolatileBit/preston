@@ -92,6 +92,8 @@ export interface EngineDeps {
   processes: ProcessTracker;
   adapter(kind: AgentKind): WorkerAdapter | undefined;
   mcpLaunch(token: string): McpLaunchSpec;
+  /** Extra guidance for a Goal's Worker (for example the standing orders that apply). */
+  workerContext?(goal: Goal): string;
   /** A Worker question still needs the Coordinator (used again after a restart). */
   raiseWorkerQuestion(question: Question): void;
   /** Asks the Coordinator how a stuck Goal should continue. */
@@ -156,6 +158,10 @@ export class GoalEngine {
     origin?: Origin | undefined;
     /** Idempotency key: the same key and objective return the Goal already created. */
     sourceKey?: string | undefined;
+    /** Skip the acknowledgement (routine scheduled work says nothing until it has an outcome). */
+    quiet?: boolean | undefined;
+    /** Called inside the creating transaction, before the first Run starts. */
+    onCreated?: ((goal: Goal) => void) | undefined;
   }): Goal {
     const projectPath = resolve(input.projectPath);
     if (!isAbsolute(input.projectPath)) {
@@ -183,8 +189,11 @@ export class GoalEngine {
         sourceKey: input.sourceKey,
       });
       recordEvent(db, clock, "goal_created", { goalId: created.id }, { agent });
+      input.onCreated?.(created);
       const ack = { kind: "ack" as const, text: ackMessage(created), goalId: created.id };
-      if (input.origin) {
+      if (input.quiet) {
+        // No acknowledgement.
+      } else if (input.origin) {
         outbox.enqueue({ ...ack, ...input.origin, dedupeKey: `ack:${created.id}` });
       } else {
         outbox.broadcast({ ...ack, dedupeKey: `ack:${created.id}` });
@@ -543,7 +552,7 @@ export class GoalEngine {
         workdir: run.workdir,
         prompt,
         resumeSessionId: run.sessionId ?? undefined,
-        appendSystemPrompt: WORKER_GUIDANCE,
+        appendSystemPrompt: withExtra(WORKER_GUIDANCE, this.deps.workerContext?.(goal)),
         model: settings.model,
         effort: settings.effort,
         mcp: this.deps.mcpLaunch(token),
@@ -1257,6 +1266,10 @@ export class GoalEngine {
     if (!goal) throw new ToolError(`There is no goal ${goalId}.`);
     return goal;
   }
+}
+
+function withExtra(base: string, extra: string | undefined): string {
+  return extra ? `${base}\n\n${extra}` : base;
 }
 
 function isTerminal(state: GoalState): boolean {

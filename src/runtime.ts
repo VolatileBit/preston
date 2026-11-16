@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ChatChannels } from "./channels/chat.js";
 import { ChannelHub, type HostNotifier } from "./channels/hub.js";
@@ -16,15 +17,23 @@ import { type Goal, GoalStore, type Run, type Verification } from "./goals/store
 import { ensureHome, type HomePaths, homePaths } from "./home.js";
 import { createLogger, type Logger, Redactor } from "./log.js";
 import { registerCoordinatorTools } from "./mcp/coordinator-tools.js";
+import { ownerTurnGuard } from "./mcp/owner-turn.js";
 import { describeChannel, registerSetupTools } from "./mcp/setup-tools.js";
 import { Tokens, type ToolClient, ToolRegistry } from "./mcp/tools.js";
 import { registerWorkerTools } from "./mcp/worker-tools.js";
+import { Memory } from "./memory/service.js";
+import { registerMemoryTools } from "./memory/tools.js";
 import { Approvals } from "./policy/escalations.js";
 import { type Question, Questions } from "./questions/questions.js";
 import { QuotaMonitor } from "./quota/monitor.js";
 import { type Bucket, QuotaStore } from "./quota/store.js";
+import { Scheduler } from "./schedule/service.js";
+import { ScheduleStore } from "./schedule/store.js";
+import { registerScheduleTools } from "./schedule/tools.js";
 import { Pairings } from "./setup/pairing.js";
 import { Setup } from "./setup/setup.js";
+import { StandingOrders } from "./standing/service.js";
+import { registerStandingTools } from "./standing/tools.js";
 import { type Db, openDatabase } from "./store/db.js";
 import { ProcessTracker } from "./supervisor/processes.js";
 import type { RunHealth } from "./supervisor/stalls.js";
@@ -84,6 +93,10 @@ export interface Runtime {
   runHealth(runId: string): RunHealth | undefined;
   /** Agent processes recorded for orphan cleanup after a crash. */
   trackedProcesses(): { pid: number; owner: string }[];
+  /** Standing orders, including the typed flags other modules read (`effectivePolicy`). */
+  readonly standing: StandingOrders;
+  readonly schedules: Scheduler;
+  readonly memory: Memory;
 }
 
 const DEFAULT_MCP_COMMAND = {
@@ -172,6 +185,18 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     stillBlocked: (bucket) => engineRef?.reviewWaits(bucket),
   });
   let approvals: Approvals | undefined;
+  const standing = new StandingOrders(db, clock, () => config.get().standing);
+  standing.seedDefaults();
+  const memory = new Memory({
+    dir: join(paths.root, "memory"),
+    db,
+    clock,
+    log: log.child("memory"),
+    goals: store,
+    isKnownSecret: (text) => redactor.redact(text) !== text,
+    settings: () => config.get().memory,
+  });
+  memory.init();
   const coordinator = new Coordinator({
     db,
     adapters,
@@ -189,6 +214,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     transcriptsDir: paths.transcripts,
     mcpLaunch,
     models,
+    contextBlocks: () => [standing.render({ audience: "coordinator" }), memory.contextBlock()],
     approval: (id) => {
       const approval = approvals?.find(id);
       if (!approval) return undefined;
@@ -212,6 +238,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     if (approval) escalations.raise(approval);
     else coordinator.submit({ kind: "worker_question", questionId: question.id });
   };
+  const scheduleStore = new ScheduleStore(db, clock);
   const engine = new GoalEngine({
     db,
     store,
@@ -226,11 +253,31 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     processes,
     adapter: (kind) => adapters.get(kind),
     mcpLaunch,
+    workerContext: (goal) =>
+      standing.render({
+        audience: "worker",
+        projectPath: goal.projectPath,
+        scheduleId: scheduleStore.scheduleOfGoal(goal.id),
+        text: `${goal.brief.objective}\n${goal.brief.scope}`,
+      }),
     raiseWorkerQuestion,
     raiseGoalEvent: (event) => coordinator.submit({ kind: "goal_event", ...event }),
     escalateApproval: (run, action, reason) => escalations.request(run, action, reason),
   });
   engineRef = engine;
+  const scheduler = new Scheduler({
+    db,
+    clock,
+    log: log.child("schedule"),
+    store: scheduleStore,
+    goals: store,
+    engine,
+    outbox,
+    config,
+    transcriptsDir: paths.transcripts,
+    standingOrderIds: (scope) =>
+      standing.applicable({ audience: "worker", ...scope }).map((order) => order.id),
+  });
   registerWorkerTools(tools, {
     engine: engine,
     questions,
@@ -258,6 +305,10 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     models,
     approvals: escalations,
   });
+  const requireOwnerTurn = ownerTurnGuard(coordinator);
+  registerStandingTools(tools, { standing, requireOwnerTurn });
+  registerScheduleTools(tools, { scheduler, coordinator, requireOwnerTurn });
+  registerMemoryTools(tools, { memory, coordinator, requireOwnerTurn });
   registerSetupTools(tools, {
     chat: chatChannels,
     hub,
@@ -352,11 +403,13 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       engine.recover();
       escalations.recover();
       quota.start();
+      scheduler.start();
       coordinator.resume();
     },
     async stop() {
       log.info("preston stopping");
       quota.stop();
+      await scheduler.stop();
       // Both mark themselves stopping synchronously, before parked waits are released.
       pairings.stop();
       const stopping = Promise.all([engine.stop(), coordinator.stop()]);
@@ -377,5 +430,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     quota: () => quota.list(),
     runHealth: (runId) => engine.runHealth(runId),
     trackedProcesses: () => processes.tracked(),
+    standing,
+    schedules: scheduler,
+    memory,
   };
 }
