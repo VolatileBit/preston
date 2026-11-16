@@ -1,0 +1,51 @@
+{
+  "_note": "Recorded account/rateLimits/read result from codex-cli 0.169.0 (2026-11-16) with ChatGPT login; account id, reset credits and plan type removed.",
+  "result": {
+    "ordinaryUsageAllowed": true,
+    "rateLimits": {
+      "limitId": "codex",
+      "limitName": null,
+      "normalModelSlug": null,
+      "primary": {
+        "usedPercent": 1,
+        "windowDurationMins": 10080,
+        "resetsAt": 1795382890
+      },
+      "secondary": null,
+      "credits": {
+        "hasCredits": false,
+        "unlimited": false,
+        "balance": "0"
+      },
+      "individualLimit": null,
+      "spendControlReached": false,
+      "planType": "unknown",
+      "rateLimitReachedType": null
+    },
+    "rateLimitsByLimitId": {
+      "codex": {
+        "limitId": "codex",
+        "limitName": null,
+        "normalModelSlug": null,
+        "primary": {
+          "usedPercent": 1,
+          "windowDurationMins": 10080,
+          "resetsAt": 1795382890
+        },
+        "secondary": null,
+        "credits": {
+          "hasCredits": false,
+          "unlimited": false,
+          "balance": "0"
+        },
+        "individualLimit": null,
+        "spendControlReached": false,
+        "planType": "unknown",
+        "rateLimitReachedType": null
+      }
+    },
+    "rateLimitResetCredits": null,
+    "accountId": null,
+    "rateLimitUpsell": null
+  }
+}
