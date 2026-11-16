@@ -35,7 +35,10 @@ export interface MeteredOptions {
   scenario: string;
   provider: string;
   /** Replaces a real event with others, to force a condition a real account cannot produce. */
-  rewrite?(turn: TurnLog, event: WorkerEvent): WorkerEvent[] | undefined;
+  rewrite?(
+    turn: TurnLog,
+    event: WorkerEvent,
+  ): WorkerEvent[] | { emit: WorkerEvent[]; stop: true } | undefined;
   /** Replaces the token-free quota read. */
   readQuota?: () => Promise<QuotaReading[]>;
   /** Called when a real turn starts, with the live handle (to inspect its process). */
@@ -85,6 +88,7 @@ export function metered(real: WorkerAdapter, options: MeteredOptions): Metered {
       };
 
       async function* events(source: RunHandle): AsyncGenerator<WorkerEvent> {
+        let interrupting: Promise<unknown> | undefined;
         try {
           for await (const event of source.events) {
             turn.events.push(event.type);
@@ -96,9 +100,22 @@ export function metered(real: WorkerAdapter, options: MeteredOptions): Metered {
             }
             const replaced = options.rewrite?.(turn, event);
             if (replaced) {
-              for (const e of replaced) {
+              const stop = !Array.isArray(replaced);
+              const emit = Array.isArray(replaced) ? replaced : replaced.emit;
+              // `stop`: the real turn is cut short (interrupted) as a real quota hit would.
+              if (stop) interrupting = source.interrupt().catch(() => undefined);
+              for (const e of emit) {
                 if (e.type === "quota_blocked" || e.type === "failed") turn.end = e.type;
                 yield e;
+              }
+              if (stop) {
+                yield {
+                  type: "exited",
+                  at: new Date().toISOString(),
+                  code: null,
+                  signal: "SIGINT",
+                };
+                return;
               }
               continue;
             }
@@ -113,6 +130,7 @@ export function metered(real: WorkerAdapter, options: MeteredOptions): Metered {
             yield event;
           }
         } finally {
+          await interrupting;
           turn.wallMs = Date.now() - turn.startedAt;
           record({
             kind: "turn",
