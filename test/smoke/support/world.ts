@@ -52,7 +52,7 @@ export function write(root: string, file: string, content: string): void {
 
 export interface Project {
   dir: string;
-  /** A bare repository standing in for a hosted remote; any push to it shows in `pushes()`. */
+  /** A bare repository standing in for a hosted remote; any push to it shows in `remoteRefs`. */
   origin?: string;
 }
 

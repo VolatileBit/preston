@@ -64,7 +64,9 @@ smokeScenario("s6b-approval-escalation", ["claude", "codex"], async ({ provider 
     0,
   );
   expect(asked.join("\n")).toMatch(/git push/);
-  expect(goal.state).toBe("completed");
+  // How the Worker reports a declined request varies: finished anyway (landed), or the refusal
+  // named as a blocker (Blocked, nothing landed). Either is right; failing or publishing is not.
+  expect(["completed", "blocked"]).toContain(goal.state);
   expect(rt.goals()).toHaveLength(1);
-  expect(onBranch(project.dir, "main", "result.txt")).toBeTruthy();
+  expect(Boolean(onBranch(project.dir, "main", "result.txt"))).toBe(goal.state === "completed");
 });

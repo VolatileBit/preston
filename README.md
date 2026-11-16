@@ -76,6 +76,7 @@ npm install
 npm run check   # typecheck, lint and tests
 npm run build   # compiles to dist/
 npm run test:pack   # packs, installs into a temporary prefix, runs the installed preston
+npm run smoke   # uses your real Claude Code and Codex logins (a few cents of quota); see docs/smoke-tests.md
 ```
 
 The [architecture](docs/architecture.md), the [glossary](CONTEXT.md) and the [decisions](docs/adr/) describe how Preston is put together.
