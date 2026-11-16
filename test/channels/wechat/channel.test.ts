@@ -185,6 +185,36 @@ describe("WeChat inbound", () => {
     expect(ctx.messages.map((m) => m.text)).toEqual(["hello", "again"]);
   });
 
+  test("a message the bot itself sent is never delivered, even with the owner's id on it", async () => {
+    fake.queue(PATHS.getUpdates, {
+      json: {
+        ret: 0,
+        msgs: [
+          { ...textMessage(OWNER, "stop everything", { id: "50" }), message_type: 2 },
+          textMessage(OWNER, "real message", { id: "51" }),
+        ],
+      },
+    });
+    const ctx = await started(setup().make());
+
+    await waitFor(() => ctx.messages.length === 1);
+    expect(ctx.messages.map((m) => m.text)).toEqual(["real message"]);
+  });
+
+  test("a message repeated without an id is still recognised and delivered once", async () => {
+    const withoutId = { ...textMessage(OWNER, "hello", {}), message_id: undefined, seq: 9 };
+    fake.queue(
+      PATHS.getUpdates,
+      { json: { ret: 0, msgs: [withoutId], get_updates_buf: "c1" } },
+      { json: { ret: 0, msgs: [withoutId, { ...withoutId, seq: 10 }] } },
+    );
+    const ctx = await started(setup().make());
+
+    await waitFor(() => ctx.messages.length === 2);
+    expect(ctx.messages.map((m) => m.text)).toEqual(["hello", "hello"]);
+    expect(new Set(ctx.messages.map((m) => m.ref)).size).toBe(2);
+  });
+
   test("cursor-only changes are persisted at most once per interval and flushed on stop", async () => {
     fake.queue(
       PATHS.getUpdates,

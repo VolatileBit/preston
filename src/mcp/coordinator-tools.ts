@@ -38,6 +38,9 @@ const goalId = z.string().min(1).describe("Goal ID, e.g. g-3f9a1c0b2d");
 export function registerCoordinatorTools(registry: ToolRegistry, deps: CoordinatorToolDeps): void {
   const { engine, store, questions, coordinator, config } = deps;
   const roles = ["coordinator"] as const;
+  // A Worker's question, a repository file or a non-owner must never be able to widen a Brief,
+  // start work or change settings, whatever the Coordinator is persuaded to try.
+  const requireOwnerTurn = ownerTurnGuard(coordinator);
 
   registry.add({
     name: "goal_create",
@@ -50,6 +53,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
       parentGoalId: goalId.optional().describe("Set for a follow-up to a finished Goal"),
     }),
     handler: async ({ projectPath, brief, parentGoalId }) => {
+      requireOwnerTurn();
       const agent = await engine.chooseAgent(projectPath);
       const invocation = coordinator.current();
       const replyTo = invocation?.replyTo;
@@ -142,7 +146,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
     }),
     handler: async ({ goalId: id, allowPublishing }) => {
       // Lifting the publishing question is the user's call, never a reaction to an event.
-      if (allowPublishing) ownerTurnGuard(coordinator)();
+      if (allowPublishing) requireOwnerTurn();
       const { goal, note } = await engine.relandGoal(id, {
         allowPublishing: allowPublishing === true,
       });
@@ -156,7 +160,10 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
       "Replace a running Goal's Brief (for example after the user corrects it). The Worker is told at its next turn boundary.",
     roles,
     input: z.strictObject({ goalId, brief: briefSchema }),
-    handler: ({ goalId: id, brief }) => summary(engine.updateBrief(id, brief)),
+    handler: ({ goalId: id, brief }) => {
+      requireOwnerTurn();
+      return summary(engine.updateBrief(id, brief));
+    },
   });
 
   registry.add({
@@ -275,6 +282,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
       reason: z.string().min(1).max(200).default("changed in chat"),
     }),
     handler: async ({ patch, reason }) => {
+      requireOwnerTurn();
       try {
         const next = config.preview(patch);
         const warnings = await checkChange(deps, config.get(), next);
@@ -307,6 +315,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
     roles,
     input: z.strictObject({ version: z.number().int().min(1) }),
     handler: ({ version }) => {
+      requireOwnerTurn();
       try {
         const result = config.rollback(version);
         return { version: result.version, config: maskConfig(result.config) };

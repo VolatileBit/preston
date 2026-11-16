@@ -12,12 +12,15 @@ export interface Logger {
   child(component: string): Logger;
 }
 
-// Token shapes worth masking even when Preston was never told about them.
-const SECRET_PATTERNS: RegExp[] = [
+// Provider token shapes worth masking even when Preston was never told about them.
+const TOKEN_PATTERNS: RegExp[] = [
   /\bxox[abposr]-[A-Za-z0-9-]{10,}/g, // Slack
   /\bxapp-[A-Za-z0-9-]{10,}/g, // Slack app-level
   /\b[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}/g, // Discord bot
   /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, // API keys
+];
+// More generic shapes: right for a log, too eager for text the user is meant to read.
+const GENERIC_PATTERNS: RegExp[] = [
   /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi,
   /\b[a-f0-9]{48,}\b/gi, // long hex secrets (IPC and MCP tokens)
 ];
@@ -32,10 +35,20 @@ export class Redactor {
     if (secret && secret.length >= 8) this.secrets.add(secret);
   }
 
+  /** For logs: known secrets and every token shape. */
   redact(text: string): string {
+    return this.mask(text, [...TOKEN_PATTERNS, ...GENERIC_PATTERNS]);
+  }
+
+  /** For messages to the user: known secrets and provider tokens, but not hashes or Bearer text. */
+  redactOutgoing(text: string): string {
+    return this.mask(text, TOKEN_PATTERNS);
+  }
+
+  private mask(text: string, patterns: RegExp[]): string {
     let out = text;
     for (const secret of this.secrets) out = out.split(secret).join(MASK);
-    for (const pattern of SECRET_PATTERNS) out = out.replace(pattern, MASK);
+    for (const pattern of patterns) out = out.replace(pattern, MASK);
     return out;
   }
 }

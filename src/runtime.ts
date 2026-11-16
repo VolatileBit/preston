@@ -157,7 +157,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   });
   chat.init();
   const chatChannels = chat;
-  const outbox = new Outbox(db, hub, clock, log.child("outbox"), () => config.get().outbox);
+  const outbox = new Outbox(
+    db,
+    hub,
+    clock,
+    log.child("outbox"),
+    () => config.get().outbox,
+    (text) => redactor.redactOutgoing(text),
+  );
   const store = new GoalStore(db, clock);
   const questions = new Questions({
     db,

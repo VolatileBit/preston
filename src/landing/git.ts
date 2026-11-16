@@ -86,6 +86,15 @@ export class Git {
   }
 }
 
+/**
+ * Whether a branch or remote name read from a repository is safe to hand to git as an argument.
+ * A name with a leading dash would be read as an option (`--upload-pack=...` runs a program), so
+ * only plain names are used; the repository's own configuration is not trusted for this.
+ */
+export function isPlainName(name: string): boolean {
+  return /^[\p{L}\p{N}_][\p{L}\p{N}_./+@-]*$/u.test(name) && !name.includes("..");
+}
+
 /** The last few lines of a failed command, for a plain explanation. */
 export function gitProblem(result: CommandResult): string {
   const text = (result.stderr || result.stdout || result.error || "").trim();
