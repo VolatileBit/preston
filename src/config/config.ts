@@ -79,6 +79,22 @@ export class ConfigManager {
     return { version, config: this.get() };
   }
 
+  /** The number of the newest config version. */
+  version(): number {
+    return this.latestVersion() ?? 0;
+  }
+
+  /** The config as it was recorded in `version`, if there is such a version. */
+  at(version: number): Config | undefined {
+    const row = one<{ config: string }>(
+      this.db,
+      "SELECT config FROM config_versions WHERE version = :version",
+      { version },
+    );
+    const parsed = row ? configSchema.safeParse(JSON.parse(row.config)) : undefined;
+    return parsed?.success ? parsed.data : undefined;
+  }
+
   history(limit = 20): ConfigVersion[] {
     return all<{ version: number; reason: string; created_at: string }>(
       this.db,
