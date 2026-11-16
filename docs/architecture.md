@@ -8,13 +8,29 @@ How Preston is put together. Product intent lives in the [spec](../specs/2026111
 
 | Invocation | Role |
 |---|---|
-| `preston` | Ensures the daemon is running (starting it detached if needed; registering it to start at login is a later slice, behind `src/daemon/start-at-login.ts`), runs the deterministic agent-choice step if no agent is configured, then opens the terminal Channel: a conversation with the Coordinator. Ctrl+C leaves the conversation; the daemon keeps running. |
+| `preston` | Registers the daemon to start at login (see Login service), ensures the daemon is running (starting it detached if needed), runs the deterministic agent-choice step if no agent is configured, then opens the terminal Channel: a conversation with the Coordinator. Ctrl+C leaves the conversation; the daemon keeps running. |
 | `preston daemon` (internal) | The long-lived runtime. Owns all state, timers, Channels, and agent processes. |
 | `preston mcp --token <t>` (internal) | A stdio MCP server that an agent CLI launches. It proxies Preston's tools to the daemon over IPC. The token identifies the caller's role (Coordinator or Worker) and its Run. |
 
-The daemon and its clients talk over a local IPC endpoint: a Unix domain socket at `<home>/preston.sock` (in the temp directory if that path would be too long), or a named pipe on Windows. Messages are newline-delimited JSON-RPC 2.0. Every connection must first call `auth` with the secret in `<home>/ipc-token`, which is readable only by the owner. A lock file (`<home>/daemon.lock`) keeps one daemon per home; a lock whose process is gone or no longer answers is taken over.
+The daemon and its clients talk over a local IPC endpoint: a Unix domain socket at `<home>/preston.sock` (in the temp directory if that path would be too long), or a named pipe on Windows. Messages are newline-delimited JSON-RPC 2.0. Every connection must first call `auth` with the secret in `<home>/ipc-token`, which is readable only by the owner. A lock file (`<home>/daemon.lock`) keeps one daemon per home, so the login service and `preston` can both start it safely: the loser exits with status 0. A lock whose process is gone is taken over, and so is one whose process has not answered on the endpoint within 20 seconds of taking the lock.
 
 IPC methods: `health`, `shutdown`, `terminal.attach` / `terminal.send` (replies arrive as `terminal.message` notifications), `setup.state` / `setup.chooseAgents` / `setup.continue`, and `mcp.describe` / `mcp.call` for the MCP proxy.
+
+`preston --version` prints the version for diagnostics. Like the internal roles it is undocumented for users; it is not a command. The executable drops Node 22's one-off `node:sqlite` ExperimentalWarning and leaves every other warning alone.
+
+## Login service
+
+`src/service` registers the daemon with the OS service manager, per user and without administrator rights. It runs the same Node (`process.execPath`) and real `dist/cli.js` path the user ran, with `PRESTON_HOME` set (on Windows only for a non-default home, which the launcher sets); stdout and stderr go to `<home>/logs/daemon.out`. The default home uses the names below; any other home gets the same names with a hash suffix, so homes never overwrite each other.
+
+| OS | Registration | Fallback |
+|---|---|---|
+| macOS | LaunchAgent `~/Library/LaunchAgents/ai.polyweave.preston.plist`, loaded with `launchctl enable` + `bootstrap gui/<uid>`. Restarted only on a crash (`KeepAlive.SuccessfulExit = false`). | If loading fails (no GUI session), the plist still starts it at the next login. |
+| Linux | systemd user unit `$XDG_CONFIG_HOME/systemd/user/preston.service`, `daemon-reload` + `enable --now`, `Restart=on-failure`. | Without a user manager: XDG autostart entry on a graphical session; otherwise not registered, and the user is told. |
+| Windows | Scheduled task `Preston`, created from XML with a logon trigger and principal scoped to the current user and `LeastPrivilege` (`/SC ONLOGON` would mean any user, which needs administrator rights). It runs `wscript.exe` on `<home>/service/start-preston.js`, which starts Node with no console window. | `Preston.cmd` in the user's Startup folder, if task creation is refused. |
+
+macOS and Linux services get the user's `PATH` with Node's directory first, because the agent CLIs need `node` and service managers start with a minimal `PATH`. `<home>/service.json` records what was registered (definition version, Node path, entrypoint, home). When that is unchanged and the artifact still exists, nothing is touched; otherwise it is re-registered, which covers Node moving after an nvm, Volta or fnm upgrade. `PATH` is deliberately not part of that record, so different shells don't cause re-registration.
+
+Registration never fails `preston`: an error becomes one plain notice ("Preston is running now, but it won't start by itself…"), shown once until it changes. `removeStartAtLogin` undoes everything for a future uninstall; it is not a user command. All OS access goes through an injectable command runner and file system (`ServiceHost`), so tests assert the generated files and commands for every OS on any host.
 
 ## Data
 
@@ -22,9 +38,10 @@ IPC methods: `health`, `shutdown`, `terminal.attach` / `terminal.send` (replies 
 
 - `config.json`: typed, validated config, plain text, mode 0600 (see the Secrets section of the spec). Every change is also recorded as a version in the database so it can be rolled back.
 - `preston.db`: SQLite via `node:sqlite`, with no native dependency. It holds Goals, Briefs, Runs, Sessions, events, questions, quota state, the outbox, and config versions. Migrations are forward-only and numbered.
-- `logs/` and `transcripts/`: `logs/preston.log` is structured JSON lines with secrets masked; `transcripts/<runId>/` holds agent transcripts and check output, referenced from the database by path.
+- `logs/` and `transcripts/`: `logs/preston.log` is structured JSON lines with secrets masked, and `logs/daemon.out` is the daemon's stdout and stderr; `transcripts/<runId>/` holds agent transcripts and check output, referenced from the database by path.
 - `coordinator/`: the working directory of the Coordinator's agent Session.
 - `worktrees/`: one git worktree per coding Goal.
+- `service.json`: what the login service registration last recorded; `service/` holds the Windows launcher and task XML.
 
 Nothing Preston owns is ever written inside a Project.
 
@@ -47,6 +64,7 @@ Nothing Preston owns is ever written inside a Project.
 - **Coordinator** is an agent Session (Claude or Codex, through the same adapters as Workers) whose tools are Preston's coordinator MCP tools. Each invocation resumes the persistent Coordinator Session with a new input, such as a user message or a meaningful event. The text of its final reply is sent back to the originating Channel.
 - **Goal engine** is the durable state machine for Goals and Runs. It starts Runs, consumes WorkerEvents, handles `ask_preston` and `report_result`, runs verification, and emits notifications.
 - **Supervisor** holds the deterministic timers: stall detection, quota rechecks, recovery on startup, and schedules. It never calls a model directly; it raises events to the Coordinator only when judgement is needed.
+- **Host notifier** (`src/notify`) backs `ChannelContext.notifyHost`, for example when WeChat ends Preston's login: `osascript` on macOS, `notify-send` on Linux if installed, a PowerShell WinRT toast on Windows with `msg` as a last resort. The text is always a separate argument or environment variable, never part of a shell command or script. The same text is shown at most once an hour and at most three notifications every ten minutes. It never throws. Only the daemon process enables it; `createRuntime` alone just logs.
 - **Outbox** delivers every outgoing message durably, retries, and records delivery state. A delivery failure never fails a Goal. Items are attempted only while their Channel is connected, in order per Channel, with exponential backoff; dedupe keys make acknowledgements, questions and outcomes go out once, even across restarts. Routing: replies and the Goal acknowledgement go to the originating conversation; questions and final outcomes go to every registered Channel. When a question is answered, undelivered copies are withdrawn and delivered copies on Channels with reactions are marked answered; nothing else is sent.
 
 All time-dependent logic takes an injectable clock, so tests can control time.
@@ -79,7 +97,7 @@ States: `queued → running → verifying → completed`. Side states are `waiti
 
 ## Testing
 
-- `npm run check` runs typecheck, lint and tests. CI runs it on macOS, Windows and Linux.
+- `npm run check` runs typecheck, lint and tests. CI (`.github/workflows/ci.yml`) runs it on macOS, Windows and Linux with Node 22 and 24, then builds and runs `npm run test:pack`, which packs the package, installs the tarball into a temporary prefix and runs the installed `preston --version`. `.gitattributes` keeps LF line endings on Windows checkouts.
 - Behaviour tests start a real Preston runtime (`createRuntime` from `src/runtime.ts`, or `startDaemon` for IPC) against a temporary `PRESTON_HOME`, using the fake Channel (`src/channels/fake`) and the fake Worker adapter (`src/workers/fake`), with an injectable clock. They assert on Channel messages, Goal outcomes and files on disk. `test/support/harness.ts` wraps this.
 - Process-level tests run the real executable, which the test global setup builds into `.preston-test-dist/`.
 - Agent adapters are tested against recorded CLI transcripts.
