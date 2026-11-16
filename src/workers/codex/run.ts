@@ -1,5 +1,6 @@
 import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
 import path from "node:path";
+import { MCP_SERVER_NAME } from "../../mcp/names.js";
 import type {
   ApprovalDecision,
   RunHandle,
@@ -518,13 +519,21 @@ class CodexRun implements RunHandle {
   private async onRequest(request: IncomingRequest): Promise<void> {
     const conn = this.conn;
     if (!conn) return;
+    if (request.method === "mcpServer/elicitation/request") {
+      // Codex asks before every MCP tool call ("Allow the preston MCP server to run tool X?").
+      // Preston's own tools are scoped by the token of this turn, so they are always allowed;
+      // anything else an MCP server asks of the user stays declined.
+      conn.respond(
+        request.id,
+        isPrestonToolCall(request.params)
+          ? { action: "accept", content: {}, _meta: null }
+          : { action: "decline", content: null, _meta: null },
+      );
+      return;
+    }
     const approval = normaliseApproval(request.method, request.params, this.fileChangePaths);
     if (!approval) {
-      if (request.method === "mcpServer/elicitation/request") {
-        conn.respond(request.id, { action: "decline", content: null, _meta: null });
-      } else {
-        conn.respondError(request.id, -32601, `Preston does not handle ${request.method}`);
-      }
+      conn.respondError(request.id, -32601, `Preston does not handle ${request.method}`);
       return;
     }
     let decision: ApprovalDecision;
@@ -613,4 +622,12 @@ function resumeFailure(resumeId: string | undefined, error: unknown): string | u
 
 export function startCodexRun(input: StartRunInput, deps: RunDeps): RunHandle {
   return new CodexRun(input, deps);
+}
+
+/** An `mcpServer/elicitation/request` that asks to run one of Preston's own MCP tools. */
+function isPrestonToolCall(raw: unknown): boolean {
+  const params = (raw ?? {}) as { serverName?: unknown; _meta?: { codex_approval_kind?: unknown } };
+  return (
+    params.serverName === MCP_SERVER_NAME && params._meta?.codex_approval_kind === "mcp_tool_call"
+  );
 }

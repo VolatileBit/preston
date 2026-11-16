@@ -397,6 +397,48 @@ describe("approvals", () => {
       result: { permissions: { network: { enabled: true } }, scope: "turn" },
     });
   });
+
+  // Seen against codex-cli 0.169.0: every MCP tool call is preceded by this request, and
+  // declining it made Preston's own tools (goal_create, report_result...) unusable.
+  test("allows Preston's own MCP tools and declines other servers' tools", async () => {
+    const script = loadFixture("turn-ok");
+    const threadId = threadIdOf(script);
+    const turnId = script.find((e) => e.msg.method === "turn/started")?.msg.params.turn.id;
+    const ask = (id: number, serverName: string, kind: string) => ({
+      method: "mcpServer/elicitation/request",
+      id,
+      params: {
+        threadId,
+        turnId,
+        serverName,
+        mode: "form",
+        _meta: { codex_approval_kind: kind, tool_name: "goal_create" },
+        message: `Allow the ${serverName} MCP server to run tool "goal_create"?`,
+        requestedSchema: { type: "object", properties: {} },
+      },
+    });
+    const { adapter, server } = setup(
+      afterTurnStarted(script, [
+        ask(21, "preston", "mcp_tool_call"),
+        ask(22, "other-server", "mcp_tool_call"),
+        ask(23, "preston", "something_else"),
+      ]),
+    );
+    await collect(adapter.startRun(input()));
+
+    expect(server().received).toContainEqual({
+      id: 21,
+      result: { action: "accept", content: {}, _meta: null },
+    });
+    expect(server().received).toContainEqual({
+      id: 22,
+      result: { action: "decline", content: null, _meta: null },
+    });
+    expect(server().received).toContainEqual({
+      id: 23,
+      result: { action: "decline", content: null, _meta: null },
+    });
+  });
 });
 
 describe("failures and quota", () => {
