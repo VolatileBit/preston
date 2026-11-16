@@ -8,7 +8,8 @@
  * Daylight saving time:
  * - A wall-clock time that does not exist (the spring-forward gap) runs once, at the moment the
  *   clocks jump.
- * - A wall-clock time that happens twice (the autumn overlap) runs once, the first time.
+ * - A wall-clock time that happens twice (the autumn overlap) runs once, the first time. Jobs
+ *   that run every hour (hour field `*`) keep running each real hour through the overlap.
  */
 
 const MINUTE = 60_000;
@@ -78,16 +79,18 @@ function offsetAt(ms: number, timeZone: string): number {
 }
 
 /**
- * The first instant at which the wall clock in `timeZone` reads `wall` (a naive UTC date). For a
- * time inside a spring-forward gap, the instant the clocks jump.
+ * Every instant at which the wall clock in `timeZone` reads `wall` (a naive UTC date), earliest
+ * first: two in the autumn overlap, one normally, and for a time inside a spring-forward gap
+ * only the instant the clocks jump.
  */
-export function wallToInstant(wall: number, timeZone: string): number {
+export function wallInstants(wall: number, timeZone: string): number[] {
   const before = offsetAt(wall - 24 * 3_600_000, timeZone);
   const after = offsetAt(wall + 24 * 3_600_000, timeZone);
   const valid = [...new Set([before, after])]
     .map((offset) => wall - offset)
-    .filter((instant) => wallTime(instant, timeZone) === wall);
-  if (valid.length) return Math.min(...valid);
+    .filter((instant) => wallTime(instant, timeZone) === wall)
+    .sort((a, b) => a - b);
+  if (valid.length) return valid;
   // In a gap: the first second at which the later offset applies.
   let low = Math.floor((wall - after) / 1000);
   let high = Math.ceil((wall - before) / 1000);
@@ -96,7 +99,12 @@ export function wallToInstant(wall: number, timeZone: string): number {
     if (offsetAt(mid * 1000, timeZone) === after) high = mid;
     else low = mid + 1;
   }
-  return low * 1000;
+  return [low * 1000];
+}
+
+/** The first instant at which the wall clock reads `wall`. */
+export function wallToInstant(wall: number, timeZone: string): number {
+  return wallInstants(wall, timeZone)[0] as number;
 }
 
 // ---- Cron expressions ------------------------------------------------------------------------
@@ -247,18 +255,26 @@ function nextWallMatch(fields: CronFields, wall: number): number | undefined {
   return undefined;
 }
 
+const HOUR = 3_600_000;
+
 function nextCron(expression: string, timeZone: string, after: number): number | undefined {
   const fields = parseCron(expression);
-  let wall = wallTime(after, timeZone);
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const match = nextWallMatch(fields, wall - (wall % MINUTE) + MINUTE);
-    if (match === undefined) return undefined;
-    const instant = wallToInstant(match, timeZone);
-    if (instant > after) return instant;
-    // The first occurrence of an overlapped time already passed; look further ahead.
-    wall = match;
+  // Jobs that run every hour keep running through the autumn overlap; fixed times run once.
+  const everyHour = fields.hours.size === 24;
+  // Start a little before the wall clock now: in the overlap, a later wall time can come first.
+  let cursor = wallTime(after, timeZone) - 3 * HOUR;
+  let best: number | undefined;
+  for (let i = 0; i < 20_000; i++) {
+    const match = nextWallMatch(fields, cursor - (cursor % MINUTE));
+    if (match === undefined) break;
+    if (best !== undefined && match > wallTime(best, timeZone) + 3 * HOUR) break;
+    const instants = wallInstants(match, timeZone);
+    for (const instant of everyHour ? instants : instants.slice(0, 1)) {
+      if (instant > after && (best === undefined || instant < best)) best = instant;
+    }
+    cursor = match + MINUTE;
   }
-  return undefined;
+  return best;
 }
 
 // ---- Triggers --------------------------------------------------------------------------------
