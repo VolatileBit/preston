@@ -79,6 +79,40 @@ describe("the Coordinator out of quota", () => {
     expect(p.rt.statusText()).toBe("In progress:\n- Make the greeting page say hello (working)");
   });
 
+  test("a Worker's question goes straight to the user, who is not kept waiting for the Coordinator", async () => {
+    const clock = new ManualClock();
+    const project = tempDir("project");
+    let blocked = false;
+    const codex = fakeAdapterFactory({
+      agent: "codex",
+      quota: () => [{ bucket: "codex:primary", available: !blocked, checkedAt: "" }],
+      coordinator: async (turn) => {
+        if (ownerMessage(turn) === "go") return goalCreatingCoordinator(project)(turn);
+        return turn.quotaBlocked({ bucket: "codex:primary" });
+      },
+    });
+    const p = await startPreston({
+      clock,
+      scenario: {
+        worker: async (turn) => {
+          while (!blocked) await new Promise((resolve) => setTimeout(resolve, 10));
+          await turn.callTool("ask_preston", { question: "Blue or green button?" });
+          return turn.stall();
+        },
+      },
+      adapters: { codex: codex.factory },
+      config: { ...TEST_CONFIG, coordinator: { agent: "codex" } },
+    });
+
+    p.owner.receive("go");
+    await waitFor(() => p.rt.goals()[0]?.state === "running");
+    blocked = true;
+    await waitFor(() => p.owner.texts("question").length === 1, { what: "the question" });
+
+    expect(p.owner.texts("question")[0]).toContain("Blue or green button?");
+    expect(p.rt.openQuestions()[0]?.state).toBe("pending_human");
+  });
+
   test("another allowed agent with headroom answers at once", async () => {
     const clock = new ManualClock();
     const codex = fakeAdapterFactory({

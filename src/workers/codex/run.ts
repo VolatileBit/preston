@@ -207,7 +207,7 @@ class CodexRun implements RunHandle {
     if (!file) return;
     try {
       mkdirSync(path.dirname(file), { recursive: true });
-      this.transcript = createWriteStream(file, { flags: "a" });
+      this.transcript = createWriteStream(file, { flags: "a", mode: 0o600 });
       this.transcript.on("error", () => {
         this.transcript = undefined;
       });

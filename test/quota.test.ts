@@ -88,6 +88,8 @@ describe("quota exhaustion", () => {
     );
     expect(p.owner.texts("notice")).toHaveLength(1);
     expect(p.rt.runs(goal.id)).toHaveLength(1);
+    // Waiting, rechecking and resuming never asked the Coordinator anything.
+    expect(p.fake.calls.filter((c) => c.role === "coordinator")).toHaveLength(1);
   });
 
   test("an early reset is noticed at the next allowed check, long before the advertised time", async () => {
@@ -320,6 +322,39 @@ describe("authentication errors", () => {
     expect(turns[1]?.input.resumeSessionId).toBe(turns[0]?.sessionId);
     expect(turns[1]?.input.prompt).toContain("signed in again");
     expect(p.owner.texts("notice")).toHaveLength(1);
+  });
+});
+
+describe("the user saying resume", () => {
+  test("rechecks a sign-in at once instead of waiting for the next scheduled check", async () => {
+    const clock = new ManualClock();
+    const project = tempDir("project");
+    let signedIn = false;
+    const codex = fakeAdapterFactory({
+      agent: "codex",
+      detection: () => ({ installed: true, loggedIn: signedIn }),
+      worker: async (turn) => {
+        if (turn.turn === 1) turn.authError("Codex is not signed in");
+        return reportingWorker(turn);
+      },
+    });
+    const p = await startPreston({
+      clock,
+      scenario: { coordinator: goalCreatingCoordinator(project) },
+      adapters: { codex: codex.factory },
+      config: { ...TEST_CONFIG, agents: { enabled: ["codex"] } },
+    });
+    p.owner.receive("go");
+    await waitFor(() => p.rt.goals()[0]?.state === "waiting_for_login", {
+      what: "the sign-in wait",
+    });
+
+    signedIn = true;
+    p.owner.receive("resume");
+    const goal = await waitFor(finishedGoal(p.rt), { what: "the goal to finish" });
+
+    expect(p.owner.texts("reply")).toContain("Checking Codex again now.");
+    expect(goal).toMatchObject({ state: "completed", outcome: "verified" });
   });
 });
 

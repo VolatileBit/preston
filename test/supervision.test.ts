@@ -61,6 +61,8 @@ describe("stall supervision", () => {
     });
     expect(goal.attempts.map((a) => a.tactic)).toEqual(["stall_resume"]);
     expect(stallEvents(p)).toEqual([]);
+    // Noticing and handling the first stall asked the Coordinator nothing.
+    expect(p.fake.calls.filter((c) => c.role === "coordinator")).toHaveLength(1);
   });
 
   test("a long-running tool is not flagged as stalled before the longer threshold", async () => {
