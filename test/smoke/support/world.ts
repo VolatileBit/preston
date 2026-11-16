@@ -41,7 +41,9 @@ export function onCleanup(fn: () => Promise<void> | void): void {
 
 export function tempDir(prefix: string): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), `preston-smoke-${prefix}-`)));
-  onCleanup(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
+  // SMOKE_KEEP=1 keeps the temporary folders, to inspect transcripts and logs after a failure.
+  if (process.env.SMOKE_KEEP) console.log(`kept ${dir}`);
+  else onCleanup(() => rmSync(dir, { recursive: true, force: true, maxRetries: 5 }));
   return dir;
 }
 
@@ -212,8 +214,21 @@ export async function startWorld(options: WorldOptions): Promise<World> {
       return (channels[channel] as LoggedChannel).receive(text);
     },
     async waitForGoal(predicate = (g) => Boolean(g.endedAt), timeoutMs = 8 * 60_000) {
+      let repliedAt: number | undefined;
       return poll(
-        () => rt.goals().find(predicate),
+        () => {
+          const found = rt.goals().find(predicate);
+          if (found) return found;
+          // The Coordinator answered but never started a Goal: fail now instead of waiting.
+          if (rt.goals().length === 0) {
+            const reply = channels.flatMap((c) => c.sent).find((m) => m.kind === "reply");
+            if (reply) repliedAt ??= Date.now();
+            if (repliedAt && Date.now() - repliedAt > 20_000) {
+              throw new Error(`The Coordinator replied but started no Goal. Reply: ${reply?.text}`);
+            }
+          }
+          return undefined;
+        },
         timeoutMs,
         "a Goal to reach the expected state",
         () =>
