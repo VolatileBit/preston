@@ -25,7 +25,44 @@ export const RESUME_AFTER_PAUSE_PROMPT =
   "The user paused this Goal and has now resumed it. Check the current state of the work, continue, and call report_result when you are finished.";
 
 export const QUOTA_RESUME_PROMPT =
-  "Your usage limit has reset, so Preston is resuming this Goal. Check the current state of the work, continue from where it stands, and call report_result when you are finished.";
+  "Quota restored; continue from where you stopped. Verify the current state of the work first (files, tests, git status) and do not redo work that is already done. Call report_result when you are finished.";
+
+export const SIGNED_IN_RESUME_PROMPT =
+  "You are signed in again, so Preston is resuming this Goal. Continue from where you stopped. Verify the current state of the work first and do not redo work that is already done. Call report_result when you are finished.";
+
+export const RATE_LIMIT_RESUME_PROMPT =
+  "The provider briefly rate-limited your requests; that has passed. Continue from where you stopped, checking the current state of the work first. Call report_result when you are finished.";
+
+export const STALL_RESUME_PROMPT =
+  "Preston stopped your last turn because it showed no activity for a long time. Check the current state of the work, continue from where it stands without redoing finished work, and avoid whatever you were waiting on (for example an interactive prompt or a command that never returns). Call report_result when you are finished.";
+
+export function strategyNotePrompt(note: string): string {
+  return `Preston is changing approach on this Goal after repeated stalls. Guidance:\n\n${note}\n\nCheck the current state of the work first, then continue. Call report_result when you are finished.`;
+}
+
+/** The first prompt of a new Session that takes over a Goal from another agent or Session. */
+export function handoverPrompt(input: {
+  brief: string;
+  reason: string;
+  previousAgent: string;
+  previousReport?: string | undefined;
+  lastMessage?: string | undefined;
+  note?: string | undefined;
+}): string {
+  const lines = [
+    input.brief,
+    "",
+    `Handover: ${input.previousAgent} worked on this Goal before you and stopped (${input.reason}). Its work so far is in this folder. You are starting a new session, so you do not have its context, and its work may be incomplete or wrong.`,
+  ];
+  if (input.previousReport) lines.push("", `Its last report: ${input.previousReport}`);
+  if (input.lastMessage) lines.push("", `Its last message: ${input.lastMessage}`);
+  if (input.note) lines.push("", `Guidance from Preston: ${input.note}`);
+  lines.push(
+    "",
+    "First inspect the current state (git status and diff where there is a repository, the files, and the tests), keep work that is done and correct, then finish the Goal and call report_result.",
+  );
+  return lines.join("\n");
+}
 
 export const REPORT_REMINDER_PROMPT =
   "You ended your turn without calling report_result. If the work is finished, call report_result now. Otherwise continue the Goal and call report_result when you are finished.";

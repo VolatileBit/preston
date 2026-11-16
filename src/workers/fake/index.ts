@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -11,7 +12,9 @@ import { AsyncQueue } from "../../util/async-queue.js";
 import type { AdapterFactory } from "../registry.js";
 import type {
   AgentDetection,
+  AgentKind,
   QuotaKind,
+  QuotaReading,
   RunHandle,
   StartRunInput,
   WorkerAdapter,
@@ -33,8 +36,12 @@ export interface FakeScenario {
    * the MCP server from the Run's launch spec, exactly as a real agent CLI would.
    */
   mcp?: "direct" | "stdio";
-  /** What `detect()` reports. Defaults to installed and logged in. */
-  detection?: AgentDetection;
+  /** What `detect()` reports (asked on every call). Defaults to installed and logged in. */
+  detection?: AgentDetection | (() => AgentDetection);
+  /** Which agent this fake stands in for (its adapter's `agent`). Defaults to "fake". */
+  agent?: AgentKind;
+  /** Enables a token-free `readQuota()` that returns these readings (asked on every call). */
+  quota?: () => QuotaReading[] | Promise<QuotaReading[]>;
 }
 
 /** Returns the turn's final text. Throwing ends the turn as an unexpected failure. */
@@ -59,6 +66,11 @@ export interface FakeTurn {
   sleep(ms: number): Promise<void>;
   /** Waits until interrupted (or the process dies). */
   stall(): Promise<never>;
+  /**
+   * Starts a real, idle child process as this turn's agent process (`RunHandle.processId`).
+   * Interrupting the turn does not stop it, as if the daemon died before it could.
+   */
+  spawnChild(): number;
   exitUnexpectedly(code?: number): never;
   quotaBlocked(options?: { bucket?: string; kind?: QuotaKind; resetsAt?: string }): never;
   authError(detail?: string): never;
@@ -74,6 +86,8 @@ export interface FakeCall {
 export interface FakeAdapter extends WorkerAdapter {
   /** Every turn started, in order. */
   readonly calls: FakeCall[];
+  /** How many times `readQuota()` was called. */
+  readonly quotaReads: number;
 }
 
 export class FakeToolError extends Error {}
@@ -106,16 +120,29 @@ export interface FakeAdapterOptions {
 export function createFakeAdapter(options: FakeAdapterOptions): FakeAdapter {
   const sessionsDir = join(options.home, "fake-agent", "sessions");
   const calls: FakeCall[] = [];
+  const { detection, quota } = options.scenario;
+  let quotaReads = 0;
   return {
-    agent: "fake",
+    agent: options.scenario.agent ?? "fake",
     calls,
+    get quotaReads() {
+      return quotaReads;
+    },
     detect: async () =>
-      options.scenario.detection ?? {
+      (typeof detection === "function" ? detection() : detection) ?? {
         installed: true,
         version: "fake",
         loggedIn: true,
         path: "fake",
       },
+    ...(quota
+      ? {
+          async readQuota() {
+            quotaReads++;
+            return quota();
+          },
+        }
+      : {}),
     startRun(input) {
       const sessionId = input.resumeSessionId ?? randomUUID();
       const role = input.runId === COORDINATOR_RUN_ID ? "coordinator" : "worker";
@@ -154,6 +181,7 @@ function startTurn(
   const at = () => isoNow(options.clock);
   const sessionPath = join(options.sessionsDir, `${sessionId}.json`);
   let mcp: Client | undefined;
+  let childPid: number | undefined;
 
   const run = async () => {
     let session: SessionFile;
@@ -241,6 +269,16 @@ function startTurn(
         new Promise<never>((_, reject) =>
           abort.signal.addEventListener("abort", () => reject(abort.signal.reason), { once: true }),
         ),
+      spawnChild() {
+        const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        child.unref();
+        childPid = child.pid;
+        queue.push({ type: "activity", at: at(), kind: "spawned", toolRunning: false });
+        return child.pid as number;
+      },
       exitUnexpectedly: (code = 1) => end({ type: "exit", code }),
       quotaBlocked: (o = {}) =>
         end({
@@ -287,6 +325,7 @@ function startTurn(
   return {
     events: queue,
     sessionId: async () => sessionId,
+    processId: () => childPid,
     async interrupt() {
       abort.abort(new Error("interrupted"));
     },

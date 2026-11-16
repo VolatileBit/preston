@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach } from "vitest";
 import { FakeChannel } from "../../src/channels/fake/index.js";
 import type { Channel } from "../../src/channels/types.js";
-import type { Clock } from "../../src/clock.js";
+import type { Clock, ManualClock } from "../../src/clock.js";
 import type { ConfigPatch } from "../../src/config/config.js";
 import { createRuntime, type Runtime } from "../../src/runtime.js";
 import {
@@ -14,6 +14,7 @@ import {
   type FakeTurn,
   fakeAdapterFactory,
 } from "../../src/workers/fake/index.js";
+import type { AdapterFactories } from "../../src/workers/registry.js";
 
 const cleanups: (() => Promise<void> | void)[] = [];
 
@@ -58,6 +59,8 @@ export async function startPreston(options: {
   clock?: Clock;
   channels?: Channel[];
   config?: ConfigPatch;
+  /** More adapters alongside the fake (for example a second fake standing in for Codex). */
+  adapters?: AdapterFactories;
 }): Promise<Preston> {
   const home = options.home ?? tempDir("preston-home");
   const channels = options.channels ?? [new FakeChannel()];
@@ -65,7 +68,7 @@ export async function startPreston(options: {
   const rt = await createRuntime({
     home,
     clock: options.clock,
-    adapters: { fake: fake.factory },
+    adapters: { fake: fake.factory, ...options.adapters },
     channels,
     initialConfig: options.config ?? TEST_CONFIG,
   });
@@ -115,6 +118,23 @@ export async function waitFor<T>(
       throw new Error(`Timed out waiting for ${options.what ?? "condition"}`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/**
+ * Moves a ManualClock forward in steps until `check` holds, so that work started by a timer
+ * (an agent turn, a verification command with its own timeout) runs without the clock racing on.
+ */
+export async function advanceUntil(
+  clock: ManualClock,
+  check: () => boolean,
+  maxMs: number,
+  stepMs = 30_000,
+): Promise<void> {
+  for (let elapsed = 0; elapsed < maxMs; elapsed += stepMs) {
+    if (check()) return;
+    await clock.advance(stepMs);
+  }
+  if (!check()) throw new Error(`Condition not met within ${maxMs} ms of clock time`);
 }
 
 /** Shell-portable check commands (they work in sh and cmd.exe). */

@@ -169,6 +169,10 @@ class CodexRun implements RunHandle {
     return this.session;
   }
 
+  processId(): number | undefined {
+    return this.child?.pid;
+  }
+
   async interrupt(): Promise<void> {
     if (!this.terminal) {
       this.interruptRequested = true;
@@ -583,10 +587,22 @@ class CodexRun implements RunHandle {
           })${stderrTail(this.stderr)}`;
       this.emitTerminal({ type: "failed", at: this.at(), error, retryable: !notFound });
     }
-    this.events.push({ type: "exited", at: this.at(), code: exit.code, signal: exit.signal });
-    this.events.end();
-    this.transcript?.end();
-    this.markDone();
+    const exited: WorkerEvent = {
+      type: "exited",
+      at: this.at(),
+      code: exit.code,
+      signal: exit.signal,
+    };
+    const finish = () => {
+      this.events.push(exited);
+      this.events.end();
+      this.markDone();
+    };
+    // The transcript is flushed before the turn is reported over, so it is complete evidence.
+    const transcript = this.transcript;
+    this.transcript = undefined;
+    if (transcript) transcript.end(finish);
+    else finish();
   }
 }
 

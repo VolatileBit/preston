@@ -227,6 +227,7 @@ function startClaudeRun(input: StartRunInput, ctx: RunContext): RunHandle {
   const handle: RunHandle = {
     events: queue,
     sessionId: () => session,
+    processId: () => child?.pid,
     interrupt: async () => {
       if (finished || !child || interruptRequested) return closed;
       interruptRequested = true;

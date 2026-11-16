@@ -127,4 +127,68 @@ export const MIGRATIONS: readonly string[] = [
     created_at TEXT NOT NULL
   );
   `,
+  // 2: Quota buckets and their checks, supervision counters on Runs, Goal attempts and
+  //    idempotency keys, tracked agent processes, and durable inbound owner messages.
+  `
+  CREATE TABLE quota_buckets (
+    bucket TEXT PRIMARY KEY,
+    agent TEXT NOT NULL,
+    state TEXT NOT NULL,
+    resets_at TEXT,
+    blocked_at TEXT,
+    next_check_at TEXT,
+    failed_checks INTEGER NOT NULL DEFAULT 0,
+    last_checked_at TEXT,
+    evidence TEXT,
+    coordinator_waiting INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE quota_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bucket TEXT NOT NULL,
+    at TEXT NOT NULL,
+    method TEXT NOT NULL,
+    result TEXT NOT NULL,
+    cost TEXT,
+    detail TEXT
+  );
+  CREATE INDEX quota_checks_by_bucket ON quota_checks(bucket);
+
+  ALTER TABLE runs ADD COLUMN quota_bucket TEXT;
+  ALTER TABLE runs ADD COLUMN waiting_since TEXT;
+  ALTER TABLE runs ADD COLUMN rate_limit_hits INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN stalls INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN strategy_pending INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN last_message TEXT;
+  CREATE INDEX runs_by_quota_bucket ON runs(quota_bucket);
+
+  ALTER TABLE goals ADD COLUMN attempts TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE goals ADD COLUMN source_key TEXT;
+  CREATE INDEX goals_by_source_key ON goals(source_key);
+
+  CREATE TABLE agent_processes (
+    pid INTEGER NOT NULL,
+    identity TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    PRIMARY KEY (pid, identity)
+  );
+
+  CREATE TABLE inbound_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    state TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    handled_at TEXT,
+    UNIQUE (channel, ref)
+  );
+  CREATE INDEX inbound_by_state ON inbound_messages(state);
+  `,
 ];

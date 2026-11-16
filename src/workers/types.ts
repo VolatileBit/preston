@@ -114,6 +114,11 @@ export interface RunHandle {
   /** Resolves once the native Session ID is known. */
   sessionId(): Promise<string>;
   interrupt(): Promise<void>;
+  /**
+   * PID of the agent process serving this turn, once it is running. Preston records it (with the
+   * process start identity) so a restarted daemon can terminate agent processes it orphaned.
+   */
+  processId?(): number | undefined;
 }
 
 export interface UpdateResult {

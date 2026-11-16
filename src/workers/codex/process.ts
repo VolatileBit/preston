@@ -8,6 +8,8 @@ export interface CodexChild {
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
+  /** Undefined until spawned (and in simulated App Servers). */
+  readonly pid?: number | undefined;
   kill(signal?: NodeJS.Signals): boolean;
   on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   on(event: "error", listener: (error: Error) => void): this;

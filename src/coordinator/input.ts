@@ -4,8 +4,16 @@ import type { Question } from "../questions/questions.js";
 
 /** What a Coordinator invocation is about. */
 export type CoordinatorInput =
-  | { kind: "message"; message: InboundMessage }
+  | {
+      kind: "message";
+      message: InboundMessage;
+      /** The durable inbox record; it is marked handled with the reply. */
+      inboundId?: number;
+      /** A Coordinator turn on this message started before and did not finish (a restart). */
+      replayed?: boolean;
+    }
   | { kind: "worker_question"; questionId: string }
+  | { kind: "goal_event"; goalId: string; runId: string; detail: string }
   | { kind: "setup"; note: string; channel: InboundMessage["channel"]; conversationId: string };
 
 export interface InputContext {
@@ -28,6 +36,20 @@ export function renderInput(
         input.message.text,
         "</preston-input>",
         "Your final reply is sent to the owner on this Channel.",
+      );
+      if (input.replayed) {
+        body.push(
+          "Preston was interrupted while handling this message before, so some of it may already be done. Check the Goals in progress before creating or changing anything again.",
+        );
+      }
+      break;
+    case "goal_event":
+      body.push(
+        `<preston-input kind="event" event="repeated-stall" goal="${input.goalId}" time="${context.time}">`,
+        `The Worker on goal ${input.goalId} keeps getting stuck: ${input.detail}. Preston already resumed it once with a note, so it will not repeat that.`,
+        "Decide how to continue with goal_change_strategy: retry_with_note (a different approach in the same session), fresh_session (a new session seeded with the Brief and a checkpoint), switch_agent (the other coding agent, if one is set up), or report_blocked (with a plain explanation for the user). Use goal_get for the Brief, Runs and attempts so far.",
+        "</preston-input>",
+        "Your final reply is not sent to anyone.",
       );
       break;
     case "worker_question":

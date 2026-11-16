@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { ManualClock } from "../src/clock.js";
+import { formatResetTime } from "../src/quota/time.js";
 import {
   brief,
   goalCreatingCoordinator,
@@ -33,11 +34,14 @@ describe("the Router", () => {
 
   test("answers status, stop, pause and resume without the Coordinator, even when it has no quota", async () => {
     const project = tempDir("project");
+    const clock = new ManualClock();
+    const reset = "2026-11-16T15:00:00.000Z";
     const p = await startPreston({
+      clock,
       scenario: {
         coordinator: async (turn) => {
           if (coordinatorCalls(p) === 1) return goalCreatingCoordinator(project, brief())(turn);
-          return turn.quotaBlocked({ bucket: "fake:5h", resetsAt: "2026-11-16T15:00:00.000Z" });
+          return turn.quotaBlocked({ bucket: "fake:5h", resetsAt: reset });
         },
         worker: async (turn) => {
           if (!turn.resumed) await turn.stall();
@@ -64,10 +68,15 @@ describe("the Router", () => {
 
     expect(coordinatorCalls(p)).toBe(callsBefore);
     const [, , status, paused, resumed, finalStatus, stopped] = p.owner.texts("reply");
-    expect(status).toBe("In progress:\n- Make the greeting page say hello (working)");
+    const quota = `Fake agent is out of quota until ${formatResetTime(reset, clock.now())}.`;
+    expect(status).toBe(
+      `${quota} 1 Goal running.\n\nIn progress:\n- Make the greeting page say hello (working)`,
+    );
     expect(paused).toBe('Paused:\n- Make the greeting page say hello\nSay "resume" to continue.');
     expect(resumed).toBe("Resumed:\n- Make the greeting page say hello");
-    expect(finalStatus).toBe("Recent results:\n- Make the greeting page say hello (verified)");
+    expect(finalStatus).toBe(
+      `${quota} No Goals in progress.\n\nRecent results:\n- Make the greeting page say hello (verified)`,
+    );
     expect(stopped).toBe("Nothing was running.");
     // The paused turn was interrupted; resuming continued the same Session.
     const worker = p.fake.calls.filter((c) => c.role === "worker");

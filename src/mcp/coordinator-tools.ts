@@ -3,10 +3,11 @@ import type { ChannelHub } from "../channels/hub.js";
 import { ConfigError, type ConfigManager, maskConfig } from "../config/config.js";
 import type { Coordinator } from "../coordinator/coordinator.js";
 import { briefSchema } from "../goals/brief.js";
-import type { GoalEngine } from "../goals/engine.js";
+import type { GoalEngine, StrategyAction } from "../goals/engine.js";
 import { describeGoalState } from "../goals/status.js";
 import type { Goal, GoalStore } from "../goals/store.js";
 import type { Questions } from "../questions/questions.js";
+import type { QuotaMonitor } from "../quota/monitor.js";
 import type { Adapters } from "../workers/registry.js";
 import { ToolError, type ToolRegistry } from "./tools.js";
 
@@ -18,6 +19,7 @@ export interface CoordinatorToolDeps {
   config: ConfigManager;
   adapters: Adapters;
   hub: ChannelHub;
+  quota: QuotaMonitor;
 }
 
 const goalId = z.string().min(1).describe("Goal ID, e.g. g-3f9a1c0b2d");
@@ -38,7 +40,9 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
       parentGoalId: goalId.optional().describe("Set for a follow-up to a finished Goal"),
     }),
     handler: ({ projectPath, brief, parentGoalId }) => {
-      const replyTo = coordinator.current()?.replyTo;
+      const invocation = coordinator.current();
+      const replyTo = invocation?.replyTo;
+      const input = invocation?.input;
       const goal = engine.createGoal({
         projectPath,
         brief,
@@ -46,6 +50,11 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
         origin: replyTo
           ? { channel: replyTo.channel, conversationId: replyTo.conversationId }
           : undefined,
+        // A message replayed after a restart must not create the same Goal twice.
+        sourceKey:
+          input?.kind === "message" && input.inboundId !== undefined
+            ? `message:${input.inboundId}`
+            : undefined,
       });
       return { goalId: goal.id, state: goal.state };
     },
@@ -80,7 +89,10 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
           fixAttempts: r.fixAttempts,
           endReason: r.endReason,
           report: r.report,
+          stalls: r.stalls,
+          waitingFor: r.quotaBucket,
         })),
+        attempts: goal.attempts,
         verifications: store.verifications(id).map((v) => ({
           passed: v.passed,
           at: v.endedAt,
@@ -111,6 +123,28 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
     roles,
     input: z.strictObject({ goalId, brief: briefSchema }),
     handler: ({ goalId: id, brief }) => summary(engine.updateBrief(id, brief)),
+  });
+
+  registry.add({
+    name: "goal_change_strategy",
+    description:
+      "Decide how a Goal continues after its Worker stalled repeatedly (Preston raises this as an event). Each decision is recorded on the Goal; do not repeat a tactic that already failed.",
+    roles,
+    input: z.strictObject({
+      goalId,
+      action: z
+        .enum(["retry_with_note", "fresh_session", "switch_agent", "report_blocked"])
+        .describe(
+          "retry_with_note: same session, different approach. fresh_session: new session from the Brief and a checkpoint. switch_agent: the other coding agent. report_blocked: tell the user.",
+        ),
+      note: z
+        .string()
+        .min(1)
+        .max(4000)
+        .describe("Guidance for the Worker, or for report_blocked the plain reason for the user"),
+    }),
+    handler: ({ goalId: id, action, note }) =>
+      summary(engine.changeStrategy(id, action as StrategyAction, note)),
   });
 
   registry.add({
@@ -174,6 +208,10 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
         })),
         channels: deps.hub.status(),
         agents: { enabled: current.agents.enabled, coordinator: current.coordinator.agent ?? null },
+        quota: deps.quota
+          .list()
+          .filter((b) => b.state !== "available" && b.state !== "unknown")
+          .map((b) => ({ bucket: b.bucket, agent: b.agent, state: b.state, resetsAt: b.resetsAt })),
         setupComplete: current.setup.complete,
       };
     },

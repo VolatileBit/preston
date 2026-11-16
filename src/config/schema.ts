@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+const MINUTE = 60_000;
+const ms = (fallback: number) => z.number().int().positive().default(fallback);
+
 export const agentKindSchema = z.enum(["claude", "codex", "fake"]);
 
 const modelSettings = {
@@ -49,11 +52,36 @@ export const configSchema = z.strictObject({
     .prefault({}),
   quota: z
     .strictObject({
-      recheckIntervalMs: z
-        .number()
-        .int()
-        .positive()
-        .default(15 * 60_000),
+      /** Base interval between token-free quota reads while a bucket is blocked (±jitter). */
+      recheckIntervalMs: ms(12.5 * MINUTE),
+      /** Base interval between probes (a real resumed turn) when no quota read is available. */
+      probeIntervalMs: ms(30 * MINUTE),
+      /** Each check that still finds the bucket blocked multiplies the interval by this. */
+      backoffFactor: z.number().min(1).max(4).default(1.5),
+      maxRecheckIntervalMs: ms(60 * MINUTE),
+      /** Spread of each interval, as a fraction of it, so checks do not line up. */
+      jitterRatio: z.number().min(0).max(0.5).default(0.2),
+      /** Check this long after an advertised reset time. */
+      resetGraceMs: ms(MINUTE),
+      /** Gap between resuming Runs that waited on the same bucket. */
+      resumeStaggerMs: ms(90_000),
+      /** First wait after a transient rate limit; doubles per repeat up to the maximum. */
+      rateLimitWaitMs: ms(MINUTE),
+      rateLimitMaxWaitMs: ms(10 * MINUTE),
+      /** A quota wait is told to the user only when it is expected to last longer than this. */
+      notifyAfterMs: ms(30 * MINUTE),
+      /** A Goal moves to another agent with headroom only when its wait is longer than this. */
+      switchAfterMs: ms(60 * MINUTE),
+    })
+    .prefault({}),
+  supervision: z
+    .strictObject({
+      /** Silence after which a turn with no tool running counts as stalled. */
+      idleStallMs: ms(10 * MINUTE),
+      /** Silence after which a turn with a tool or command still running counts as stalled. */
+      toolStallMs: ms(60 * MINUTE),
+      /** Coordinator strategy changes per Goal before Preston reports it as Blocked. */
+      maxStrategyChanges: z.number().int().min(0).max(5).default(2),
     })
     .prefault({}),
   outbox: z

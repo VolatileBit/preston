@@ -7,8 +7,9 @@ import { type Clock, systemClock } from "./clock.js";
 import { ConfigManager, type ConfigPatch, configSecrets } from "./config/config.js";
 import type { Config } from "./config/schema.js";
 import { Coordinator } from "./coordinator/coordinator.js";
+import { Inbox } from "./coordinator/inbox.js";
 import { GoalEngine } from "./goals/engine.js";
-import { statusText } from "./goals/status.js";
+import { type AgentBlock, statusText } from "./goals/status.js";
 import { type Goal, GoalStore, type Run, type Verification } from "./goals/store.js";
 import { ensureHome, type HomePaths, homePaths } from "./home.js";
 import { createLogger, type Logger, Redactor } from "./log.js";
@@ -16,9 +17,18 @@ import { registerCoordinatorTools } from "./mcp/coordinator-tools.js";
 import { Tokens, type ToolClient, ToolRegistry } from "./mcp/tools.js";
 import { registerWorkerTools } from "./mcp/worker-tools.js";
 import { type Question, Questions } from "./questions/questions.js";
+import { QuotaMonitor } from "./quota/monitor.js";
+import { type Bucket, QuotaStore } from "./quota/store.js";
 import { Setup } from "./setup/setup.js";
 import { type Db, openDatabase } from "./store/db.js";
-import { type AdapterFactories, Adapters, BUILTIN_ADAPTERS } from "./workers/registry.js";
+import { ProcessTracker } from "./supervisor/processes.js";
+import type { RunHealth } from "./supervisor/stalls.js";
+import {
+  type AdapterFactories,
+  Adapters,
+  agentLabel,
+  BUILTIN_ADAPTERS,
+} from "./workers/registry.js";
 import type { McpLaunchSpec } from "./workers/types.js";
 
 export interface RuntimeOptions {
@@ -55,6 +65,12 @@ export interface Runtime {
   openQuestions(): Question[];
   /** The deterministic "status" text. */
   statusText(): string;
+  /** Quota buckets Preston knows about, and whether each is being monitored. */
+  quota(): (Bucket & { monitored: boolean })[];
+  /** How the supervisor sees a Run right now. */
+  runHealth(runId: string): RunHealth | undefined;
+  /** Agent processes recorded for orphan cleanup after a crash. */
+  trackedProcesses(): { pid: number; owner: string }[];
 }
 
 const DEFAULT_MCP_COMMAND = {
@@ -111,22 +127,45 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     log: log.child("agents"),
     tools,
   });
-  const coordinator = new Coordinator({
+  const processes = new ProcessTracker(db, clock, log.child("processes"));
+  const inbox = new Inbox(db, clock);
+  // The monitor, engine and Coordinator call each other; the closures resolve after creation.
+  let engine: GoalEngine | undefined;
+  let coordinator: Coordinator | undefined;
+  const quota = new QuotaMonitor({
+    store: new QuotaStore(db, clock),
+    clock,
+    log: log.child("quota"),
+    settings: () => config.get().quota,
+    adapter: (kind) => adapters.get(kind),
+    waitingRuns: (bucket) => store.waitingRuns(bucket).map((r) => r.id),
+    resumeRun: (runId, probe) => engine?.resumeFromQuota(runId, probe) ?? false,
+    resumeCoordinator: (probe) => coordinator?.resume(probe) ?? false,
+    stillBlocked: (bucket) => engine?.reviewWaits(bucket),
+  });
+  coordinator = new Coordinator({
+    db,
     adapters,
     config,
     store,
     questions,
     outbox,
+    inbox,
+    quota,
+    processes,
     tokens,
     clock,
     log: log.child("coordinator"),
     workdir: paths.coordinator,
     transcriptsDir: paths.transcripts,
     mcpLaunch,
+    pendingGoalEvents: () => engine?.pendingGoalEvents() ?? [],
+    goalEventHandled: (event) => engine?.goalEventHandled(event),
   });
+  const theCoordinator = coordinator;
   const raiseWorkerQuestion = (question: Question) =>
-    coordinator.submit({ kind: "worker_question", questionId: question.id });
-  const engine = new GoalEngine({
+    theCoordinator.submit({ kind: "worker_question", questionId: question.id });
+  engine = new GoalEngine({
     db,
     store,
     questions,
@@ -136,48 +175,81 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     clock,
     log: log.child("goals"),
     transcriptsDir: paths.transcripts,
+    quota,
+    processes,
     adapter: (kind) => adapters.get(kind),
     mcpLaunch,
     raiseWorkerQuestion,
+    raiseGoalEvent: (event) => theCoordinator.submit({ kind: "goal_event", ...event }),
   });
+  const theEngine = engine;
   registerWorkerTools(tools, {
-    engine,
+    engine: theEngine,
     questions,
     config,
     coordinatorWorkdir: paths.coordinator,
     raiseWorkerQuestion,
   });
-  registerCoordinatorTools(tools, { engine, store, questions, coordinator, config, adapters, hub });
+  registerCoordinatorTools(tools, {
+    engine: theEngine,
+    store,
+    questions,
+    coordinator: theCoordinator,
+    config,
+    adapters,
+    hub,
+    quota,
+  });
 
-  const status = () => statusText(store.listGoals({ finishedLimit: 5 }), questions.open());
+  const status = () => {
+    const blocks: AgentBlock[] = [];
+    for (const agent of adapters.kinds()) {
+      const bucket = quota.activeBlock(agent);
+      if (bucket) blocks.push({ label: agentLabel(agent), bucket });
+    }
+    return statusText(store.listGoals({ finishedLimit: 5 }), questions.open(), blocks, clock.now());
+  };
   const router = new Router({
     outbox,
     log: log.child("router"),
-    toCoordinator: (message) => coordinator.submit({ kind: "message", message }),
+    // Persisted before the Coordinator sees it; marked handled only with the reply.
+    toCoordinator: (message) => {
+      const inboundId = inbox.record(message);
+      if (inboundId === undefined) {
+        log.child("router").info("ignored a redelivered message", { channel: message.channel });
+        return;
+      }
+      theCoordinator.submit({ kind: "message", message, inboundId });
+    },
     fixed: {
       status,
       stop: () => {
-        const stopped = engine.stopAll();
+        const stopped = theEngine.stopAll();
         return stopped.length
           ? `Stopped:\n${stopped.map((g) => `- ${g.brief.objective}`).join("\n")}`
           : "Nothing was running.";
       },
       pause: () => {
-        const paused = engine.pauseAll();
+        const paused = theEngine.pauseAll();
         return paused.length
           ? `Paused:\n${paused.map((g) => `- ${g.brief.objective}`).join("\n")}\nSay "resume" to continue.`
           : "Nothing to pause.";
       },
       resume: () => {
-        const resumed = engine.resumeAll();
-        return resumed.length
-          ? `Resumed:\n${resumed.map((g) => `- ${g.brief.objective}`).join("\n")}`
-          : "Nothing is paused.";
+        const resumed = theEngine.resumeAll();
+        const rechecked = quota.recheckForUser().map(agentLabel);
+        const lines = resumed.length
+          ? [`Resumed:\n${resumed.map((g) => `- ${g.brief.objective}`).join("\n")}`]
+          : rechecked.length
+            ? []
+            : ["Nothing is paused."];
+        if (rechecked.length) lines.push(`Checking ${rechecked.join(" and ")} again now.`);
+        return lines.join("\n");
       },
     },
   });
   hub.onInbound((message) => router.handle(message));
-  const setup = new Setup({ config, adapters, coordinator });
+  const setup = new Setup({ config, adapters, coordinator: theCoordinator });
 
   let started = false;
   return {
@@ -192,12 +264,18 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       log.info("preston starting", { home: paths.root, pid: process.pid });
       await hub.start();
       outbox.start();
-      engine.recover();
+      // Orphaned agent processes from a crashed daemon go before any Session resumes.
+      const orphans = await processes.reconcile();
+      if (orphans) log.warn("terminated orphaned agent processes", { count: orphans });
+      theEngine.recover();
+      quota.start();
+      theCoordinator.resume();
     },
     async stop() {
       log.info("preston stopping");
+      quota.stop();
       // Both mark themselves stopping synchronously, before parked waits are released.
-      const stopping = Promise.all([engine.stop(), coordinator.stop()]);
+      const stopping = Promise.all([theEngine.stop(), theCoordinator.stop()]);
       questions.releaseWaiters();
       await stopping;
       await outbox.stop();
@@ -210,5 +288,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     verifications: (goalId) => store.verifications(goalId),
     openQuestions: () => questions.open(),
     statusText: status,
+    quota: () => quota.list(),
+    runHealth: (runId) => theEngine.runHealth(runId),
+    trackedProcesses: () => processes.tracked(),
   };
 }

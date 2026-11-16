@@ -14,6 +14,7 @@ export type GoalState =
   | "completed"
   | "waiting_for_quota"
   | "waiting_for_user"
+  | "waiting_for_login"
   | "recovering"
   | "paused"
   | "blocked"
@@ -32,6 +33,22 @@ export type Outcome = "verified" | "unverified";
 /** `active`: a turn is executing. `parked`: waiting (answer, quota, resume). `ended`: done. */
 export type RunState = "active" | "parked" | "ended";
 
+/** One tactic Preston tried for a Goal, so it changes strategy instead of repeating itself. */
+export interface Attempt {
+  at: string;
+  runId: string;
+  agent: AgentKind;
+  tactic:
+    | "stall_resume"
+    | "strategy_event"
+    | "retry_with_note"
+    | "fresh_session"
+    | "switch_agent"
+    | "quota_handover"
+    | "report_blocked";
+  reason: string;
+}
+
 export interface Origin {
   channel: ChannelKind;
   conversationId: string;
@@ -49,6 +66,8 @@ export interface Goal {
   detail: string | null;
   origin: Origin | null;
   wakeAt: string | null;
+  /** Tactics tried so far (stall recovery, strategy changes, agent handovers). */
+  attempts: Attempt[];
   createdAt: string;
   updatedAt: string;
   endedAt: string | null;
@@ -78,6 +97,18 @@ export interface Run {
   briefChanged: boolean;
   transcriptDir: string;
   endReason: string | null;
+  /** The quota bucket (or `auth:<agent>`) this parked Run waits for. */
+  quotaBucket: string | null;
+  /** When the current wait for quota began. */
+  waitingSince: string | null;
+  /** Consecutive transient rate limits, for the short backoff. */
+  rateLimitHits: number;
+  /** Stalls since the last strategy change. */
+  stalls: number;
+  /** A Coordinator event is out to decide how this Run continues. */
+  strategyPending: boolean;
+  /** The Worker's latest message, kept for a handover checkpoint. */
+  lastMessage: string | null;
   createdAt: string;
   endedAt: string | null;
 }
@@ -103,6 +134,7 @@ interface GoalRow {
   origin_channel: ChannelKind | null;
   origin_conversation: string | null;
   wake_at: string | null;
+  attempts: string;
   created_at: string;
   updated_at: string;
   ended_at: string | null;
@@ -123,6 +155,12 @@ interface RunRow {
   brief_changed: number;
   transcript_dir: string;
   end_reason: string | null;
+  quota_bucket: string | null;
+  waiting_since: string | null;
+  rate_limit_hits: number;
+  stalls: number;
+  strategy_pending: number;
+  last_message: string | null;
   created_at: string;
   ended_at: string | null;
 }
@@ -155,14 +193,16 @@ export class GoalStore {
     brief: Brief;
     parentGoalId?: string | undefined;
     origin?: Origin | undefined;
+    sourceKey?: string | undefined;
   }): Goal {
     const id = newId("g");
     const at = this.now();
     run(
       this.db,
-      `INSERT INTO goals (id, project_id, parent_goal_id, state, brief, origin_channel, origin_conversation, created_at, updated_at)
-       VALUES (:id, :project, :parent, 'queued', :brief, :channel, :conversation, :at, :at)`,
+      `INSERT INTO goals (id, project_id, parent_goal_id, state, brief, origin_channel, origin_conversation, source_key, created_at, updated_at)
+       VALUES (:id, :project, :parent, 'queued', :brief, :channel, :conversation, :source, :at, :at)`,
       {
+        source: input.sourceKey ?? null,
         id,
         project: input.projectId,
         parent: input.parentGoalId ?? null,
@@ -178,6 +218,22 @@ export class GoalStore {
   findGoal(id: string): Goal | undefined {
     const row = one<GoalRow>(this.db, `${GOAL_SELECT} WHERE g.id = :id`, { id });
     return row ? toGoal(row) : undefined;
+  }
+
+  /** A Goal already created for this idempotency key with this objective (a replayed request). */
+  findGoalBySource(sourceKey: string, objective: string): Goal | undefined {
+    return all<GoalRow>(this.db, `${GOAL_SELECT} WHERE g.source_key = :key`, { key: sourceKey })
+      .map(toGoal)
+      .find((g) => g.brief.objective === objective);
+  }
+
+  addAttempt(goalId: string, attempt: Omit<Attempt, "at">): void {
+    const goal = this.goal(goalId);
+    const attempts = [...goal.attempts, { at: this.now(), ...attempt }].slice(-50);
+    run(this.db, "UPDATE goals SET attempts = :attempts WHERE id = :id", {
+      id: goalId,
+      attempts: JSON.stringify(attempts),
+    });
   }
 
   goal(id: string): Goal {
@@ -285,6 +341,26 @@ export class GoalStore {
     return row ? toRun(row) : undefined;
   }
 
+  /** Parked Runs waiting on a quota bucket whose Goal still waits for it, longest wait first. */
+  waitingRuns(bucket: string): Run[] {
+    return all<RunRow>(
+      this.db,
+      `SELECT r.* FROM runs r JOIN goals g ON g.id = r.goal_id
+       WHERE r.quota_bucket = :bucket AND r.state = 'parked'
+         AND g.state IN ('waiting_for_quota', 'waiting_for_login')
+       ORDER BY r.waiting_since, r.rowid`,
+      { bucket },
+    ).map(toRun);
+  }
+
+  /** Runs a Coordinator decision is pending for. */
+  strategyPendingRuns(): Run[] {
+    return all<RunRow>(
+      this.db,
+      "SELECT * FROM runs WHERE strategy_pending = 1 AND state != 'ended' ORDER BY rowid",
+    ).map(toRun);
+  }
+
   runsForGoal(goalId: string): Run[] {
     return all<RunRow>(this.db, "SELECT * FROM runs WHERE goal_id = :goal ORDER BY rowid", {
       goal: goalId,
@@ -303,6 +379,12 @@ export class GoalStore {
       reportPending: boolean;
       briefChanged: boolean;
       endReason: string;
+      quotaBucket: string | null;
+      waitingSince: string | null;
+      rateLimitHits: number;
+      stalls: number;
+      strategyPending: boolean;
+      lastMessage: string;
     }>,
   ): void {
     const columns: Record<string, string> = {
@@ -315,6 +397,12 @@ export class GoalStore {
       reportPending: "report_pending",
       briefChanged: "brief_changed",
       endReason: "end_reason",
+      quotaBucket: "quota_bucket",
+      waitingSince: "waiting_since",
+      rateLimitHits: "rate_limit_hits",
+      stalls: "stalls",
+      strategyPending: "strategy_pending",
+      lastMessage: "last_message",
     };
     const sets: string[] = ["updated_at = :at"];
     const params: Record<string, string | number | null> = { id, at: this.now() };
@@ -323,11 +411,13 @@ export class GoalStore {
       if (!column || value === undefined) continue;
       sets.push(`${column} = :${key}`);
       params[key] =
-        typeof value === "boolean"
-          ? Number(value)
-          : typeof value === "object"
-            ? JSON.stringify(value)
-            : value;
+        value === null
+          ? null
+          : typeof value === "boolean"
+            ? Number(value)
+            : typeof value === "object"
+              ? JSON.stringify(value)
+              : value;
     }
     if (patch.state === "ended") sets.push("ended_at = :at");
     run(this.db, `UPDATE runs SET ${sets.join(", ")} WHERE id = :id`, params);
@@ -417,6 +507,7 @@ function toGoal(row: GoalRow): Goal {
         ? { channel: row.origin_channel, conversationId: row.origin_conversation }
         : null,
     wakeAt: row.wake_at,
+    attempts: JSON.parse(row.attempts) as Attempt[],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     endedAt: row.ended_at,
@@ -439,6 +530,12 @@ function toRun(row: RunRow): Run {
     briefChanged: row.brief_changed === 1,
     transcriptDir: row.transcript_dir,
     endReason: row.end_reason,
+    quotaBucket: row.quota_bucket,
+    waitingSince: row.waiting_since,
+    rateLimitHits: row.rate_limit_hits,
+    stalls: row.stalls,
+    strategyPending: row.strategy_pending === 1,
+    lastMessage: row.last_message,
     createdAt: row.created_at,
     endedAt: row.ended_at,
   };

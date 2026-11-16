@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type {
   Channel,
   ChannelCapabilities,
@@ -36,6 +37,8 @@ export class FakeChannel implements Channel {
   private failures: Failure[] = [];
   private failAll: Failure | undefined;
   private seq = 0;
+  /** Native refs are unique across instances, as a real service's are across restarts. */
+  private readonly tag = randomBytes(3).toString("hex");
 
   constructor(options: FakeChannelOptions = {}) {
     this.kind = options.kind ?? "fake";
@@ -56,9 +59,13 @@ export class FakeChannel implements Channel {
   }
 
   /** Simulates the user (or, with `owner: false`, someone else) sending a message. */
-  receive(text: string, options: { owner?: boolean; senderId?: string } = {}): string {
+  /** With `ref`, simulates the service delivering the same native message again. */
+  receive(
+    text: string,
+    options: { owner?: boolean; senderId?: string; ref?: string } = {},
+  ): string {
     if (!this.ctx) throw new Error(`${this.kind} fake Channel is not started`);
-    const ref = `${this.kind}-in-${++this.seq}`;
+    const ref = options.ref ?? `${this.kind}-in-${this.tag}-${++this.seq}`;
     const owner = options.owner ?? true;
     this.ctx.onMessage({
       channel: this.kind,
