@@ -11,12 +11,7 @@ import {
   tempDir,
   waitFor,
 } from "../support/harness.js";
-import {
-  branches,
-  loggingCheck,
-  worktreesIn,
-  writingWorker,
-} from "../support/landing.js";
+import { branches, loggingCheck, worktreesIn, writingWorker } from "../support/landing.js";
 
 const read = (dir: string, file: string) => readFileSync(join(dir, file), "utf8");
 
