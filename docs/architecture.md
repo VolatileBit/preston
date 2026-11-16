@@ -159,6 +159,7 @@ All of this is deterministic and persisted; none of it calls a model.
 
 - `npm run check` runs typecheck, lint and tests. CI (`.github/workflows/ci.yml`) runs it on macOS, Windows and Linux with Node 22 and 24, then builds and runs `npm run test:pack`, which packs the package, installs the tarball into a temporary prefix and runs the installed `preston --version`. `.gitattributes` keeps LF line endings on Windows checkouts.
 - Behaviour tests start a real Preston runtime (`createRuntime` from `src/runtime.ts`, or `startDaemon` for IPC) against a temporary `PRESTON_HOME`, using the fake Channel (`src/channels/fake`) and the fake Worker adapter (`src/workers/fake`), with an injectable clock. They assert on Channel messages, Goal outcomes and files on disk. `test/support/harness.ts` wraps this.
+- Landing tests (`test/landing`) use real `git` in throwaway repositories under the temp directory and a `FakeGitHub` (`test/support/github.ts`) whose remote is a real bare repository; `gh` itself is only tested for the arguments it is given. `test/support/git.ts` isolates them from the developer's own git configuration.
 - Process-level tests run the real executable, which the test global setup builds into `.preston-test-dist/`.
 - Agent adapters are tested against recorded CLI transcripts.
 - Real-provider smoke tests live under `test/smoke/` and run only through `npm run smoke`, never in CI.
