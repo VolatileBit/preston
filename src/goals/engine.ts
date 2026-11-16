@@ -266,6 +266,50 @@ export class GoalEngine {
     return paused;
   }
 
+  /**
+   * Tries again to merge a finished Goal's verified work that was held back (the user said no
+   * to a publishing question) or blocked (an overlap with their own edits, checks that did not
+   * finish). It never runs the Worker unless landing itself needs it, and it never merges work
+   * Preston did not verify. Safe to repeat: a Goal already being merged is left alone.
+   */
+  async relandGoal(
+    goalId: string,
+    options: { allowPublishing: boolean },
+  ): Promise<{ goal: Goal; note: string }> {
+    const { store, db, clock, landing } = this.deps;
+    if (!landing) throw new ToolError("Merging is not available in this Preston.");
+    const goal = this.requireGoal(goalId);
+    if (!isTerminal(goal.state)) {
+      if (landing.isLanding(goalId)) return { goal, note: "It is already being merged." };
+      throw new ToolError(`Goal ${goalId} has not finished, so there is nothing to merge yet.`);
+    }
+    const problem = await landing.prepareReland(goal);
+    if (problem) throw new ToolError(problem);
+    const last = store.runsForGoal(goalId).at(-1);
+    const started = transaction(db, () => {
+      // Another call may have started it while the working copy was being restored.
+      if (!isTerminal(store.goal(goalId).state)) return false;
+      landing.resetForReland(goalId, options);
+      const run = store.createRun({
+        goalId,
+        agent: last?.agent ?? this.pickAgent(),
+        workdir: last?.workdir ?? goal.projectPath,
+        transcriptDir: (id) => join(this.deps.transcriptsDir, id),
+      });
+      // Landing may need the Worker (a conflict): it continues the Session that did the work.
+      store.updateRun(run.id, {
+        ...(last?.sessionId ? { sessionId: last.sessionId } : {}),
+        ...(last?.report ? { report: last.report } : {}),
+      });
+      store.setGoalState(goalId, "verifying", { detail: "Merging the finished work." });
+      recordEvent(db, clock, "goal_relanded", { goalId, runId: run.id }, options);
+      return true;
+    });
+    if (!started) return { goal: store.goal(goalId), note: "It is already being merged." };
+    this.landWork(goalId);
+    return { goal: store.goal(goalId), note: "Trying to merge it again." };
+  }
+
   /** Cancels every Goal that has not finished. */
   stopAll(): Goal[] {
     return this.deps.store.activeGoals().map((goal) => this.cancelGoal(goal.id, "Stopped by you."));
@@ -1322,7 +1366,8 @@ export class GoalEngine {
         kind: "outcome",
         text: result.message,
         goalId: goal.id,
-        dedupeKey: `outcome:${goal.id}`,
+        // Per Run: a Goal merged again after being held back reports a new outcome.
+        dedupeKey: `outcome:${goal.id}:${run.id}`,
       });
     });
     this.deps.log.info("goal finished", { goalId: goal.id, state: result.state, outcome });

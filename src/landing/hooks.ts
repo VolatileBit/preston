@@ -41,6 +41,18 @@ export interface LandingHooks {
   questionGoal(questionId: string): string | undefined;
   /** A plain-language note for outcomes that did not land (kept branch, in-place fallback). */
   outcomeNote(goal: Goal): string | undefined;
+  /**
+   * Why a finished Goal's verified work cannot be merged again now (it was never verified, it
+   * is already merged, it has no saved work), or undefined when it can. Restores the working
+   * copy if it was removed to save space.
+   */
+  prepareReland(goal: Goal): Promise<string | undefined>;
+  /**
+   * Clears what stopped the last landing so `land` tries again from the start (synchronous, so
+   * the engine can do it in the transaction that moves the Goal back to verifying). Without
+   * `allowPublishing` a merge that would publish is asked about again.
+   */
+  resetForReland(goalId: string, options: { allowPublishing: boolean }): void;
   /** Stops waits and checks of one Goal's landing (cancelled), or of all of them (shutdown). */
   abort(goalId?: string): void;
 }

@@ -15,6 +15,7 @@ import type { Questions } from "../questions/questions.js";
 import type { QuotaMonitor } from "../quota/monitor.js";
 import type { ModelCatalog } from "../workers/models.js";
 import { type Adapters, agentLabel } from "../workers/registry.js";
+import { ownerTurnGuard } from "./owner-turn.js";
 import { ToolError, type ToolRegistry } from "./tools.js";
 
 export interface CoordinatorToolDeps {
@@ -123,6 +124,28 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
     roles,
     input: z.strictObject({ goalId }),
     handler: ({ goalId: id }) => summary(engine.cancelGoal(id)),
+  });
+
+  registry.add({
+    name: "goal_land",
+    description:
+      "Try again to merge the verified work of a finished Goal that was not merged: the user said no to a question about publishing and has changed their mind, an overlap with their own edits has been sorted out, or the pull request's checks timed out. Only work Preston verified is ever merged; the same safety rules apply as the first time. Safe to repeat. Set allowPublishing to true only when the user's latest message says to go ahead even though the merge also publishes something; otherwise Preston asks that question again.",
+    roles,
+    input: z.strictObject({
+      goalId,
+      allowPublishing: z
+        .boolean()
+        .optional()
+        .describe("The user just said to merge even though it publishes something"),
+    }),
+    handler: async ({ goalId: id, allowPublishing }) => {
+      // Lifting the publishing question is the user's call, never a reaction to an event.
+      if (allowPublishing) ownerTurnGuard(coordinator)();
+      const { goal, note } = await engine.relandGoal(id, {
+        allowPublishing: allowPublishing === true,
+      });
+      return { ...summary(goal), note };
+    },
   });
 
   registry.add({

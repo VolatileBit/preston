@@ -18,7 +18,11 @@ export interface Workspace {
   baseSha: string | null;
   /** Why the work is in place although the Project is a repository. */
   reason: string | null;
-  state: "active" | "removed";
+  /**
+   * `active`: the folder exists. `archived`: the folder was removed to save space and the branch
+   * kept. `removed`: folder and branch are gone (the work landed or there was none).
+   */
+  state: "active" | "archived" | "removed";
 }
 
 export type LandingState = "active" | "awaiting_user" | "awaiting_worker" | "done";
@@ -188,6 +192,16 @@ export class LandingStore {
     );
   }
 
+  /** Working copies whose folders still exist. */
+  activeWorktrees(): Workspace[] {
+    return all<{ goal_id: string }>(
+      this.db,
+      "SELECT goal_id FROM goal_workspaces WHERE mode = 'worktree' AND state = 'active' ORDER BY created_at, rowid",
+    )
+      .map((r) => this.workspace(r.goal_id))
+      .filter((w): w is Workspace => w !== undefined);
+  }
+
   setWorkspaceState(goalId: string, state: Workspace["state"]): void {
     run(
       this.db,
@@ -225,13 +239,13 @@ export class LandingStore {
     goalId: string,
     patch: Partial<{
       state: LandingState;
-      mode: "pr" | "local";
+      mode: "pr" | "local" | null;
       modeNote: string | null;
       prNumber: number;
       prUrl: string;
-      questionId: string;
-      publishing: PublishingVerdict;
-      decision: "yes" | "no";
+      questionId: string | null;
+      publishing: PublishingVerdict | null;
+      decision: "yes" | "no" | null;
       fixAttempts: number;
       ciStartedAt: string | null;
       candidateSha: string;

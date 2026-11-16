@@ -114,6 +114,11 @@ export const configSchema = z.strictObject({
       ciStartGraceMs: z.number().int().min(0).default(90_000),
       /** Times the Worker is re-run to fix a merge conflict or a failure found while landing. */
       conflictFixAttempts: z.number().int().min(0).max(3).default(1),
+      /**
+       * How long the working copy of a Goal that ended without its work landing (cancelled,
+       * failed, blocked, held) is kept before its folder is removed. The branch always stays.
+       */
+      worktreeRetentionMs: ms(14 * 24 * 60 * MINUTE),
     })
     .prefault({}),
   outbox: z

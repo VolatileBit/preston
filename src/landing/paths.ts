@@ -41,11 +41,19 @@ export function posix(path: string): string {
   return path.replace(/\\/g, "/");
 }
 
+function normalised(path: string): string {
+  const value = posix(canonicalPath(path)).replace(/\/+$/, "");
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
 /** Same folder, whatever the spelling (case on Windows, slashes, trailing separators). */
 export function samePath(a: string, b: string): boolean {
-  const norm = (p: string) => {
-    const value = posix(canonicalPath(p)).replace(/\/+$/, "");
-    return process.platform === "win32" ? value.toLowerCase() : value;
-  };
-  return norm(a) === norm(b);
+  return normalised(a) === normalised(b);
+}
+
+/** Whether `child` is `parent` itself or somewhere inside it, whatever the spelling. */
+export function isInside(parent: string, child: string): boolean {
+  const base = normalised(parent);
+  const path = normalised(child);
+  return path === base || path.startsWith(`${base}/`);
 }
