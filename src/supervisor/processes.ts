@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { type Clock, isoNow } from "../clock.js";
 import type { Logger } from "../log.js";
 import { all, type Db, run } from "../store/db.js";
+import { killTree } from "../util/process-tree.js";
 import type { AgentKind } from "../workers/types.js";
 
 /**
@@ -106,23 +107,16 @@ export const systemProcesses: ProcessProbe = {
       await exec("taskkill", ["/pid", String(pid), "/T", "/F"]).catch(() => "");
       return;
     }
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      return;
-    }
+    // The agent leads a process group of its own, so its tools and servers go with it.
+    if (!killTree(pid, "SIGTERM")) return;
     // Real time: this waits for an actual process, not for Preston's own schedule.
     const deadline = Date.now() + 3_000;
     while (isAlive(pid) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    if (isAlive(pid)) {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Gone in the meantime.
-      }
-    }
+    // Also what the agent left running when it was the first to go.
+    killTree(pid, "SIGKILL", { groupOnly: true });
+    if (isAlive(pid)) killTree(pid, "SIGKILL");
   },
 };
 
