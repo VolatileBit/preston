@@ -7,7 +7,8 @@ import type { ChatChannelKind, ChatChannelSpec } from "../../src/channels/regist
 import type { Channel } from "../../src/channels/types.js";
 import type { Clock, ManualClock } from "../../src/clock.js";
 import type { ConfigPatch } from "../../src/config/config.js";
-import { createRuntime, type Runtime } from "../../src/runtime.js";
+import { noGitHub } from "../../src/landing/github.js";
+import { createRuntime, type Runtime, type RuntimeOptions } from "../../src/runtime.js";
 import {
   type FakeAdapter,
   type FakeScenario,
@@ -66,6 +67,8 @@ export async function startPreston(options: {
   chatChannels?: Record<ChatChannelKind, ChatChannelSpec>;
   /** Wraps the fake adapter (for example to add listModels). */
   wrapAdapter?: (adapter: FakeAdapter) => FakeAdapter;
+  /** The GitHub client used to land work. Default: GitHub is not available. */
+  landing?: RuntimeOptions["landing"];
 }): Promise<Preston> {
   const home = options.home ?? tempDir("preston-home");
   const channels = options.channels ?? [new FakeChannel()];
@@ -83,6 +86,7 @@ export async function startPreston(options: {
     channels,
     chatChannels: options.chatChannels,
     initialConfig: options.config ?? TEST_CONFIG,
+    landing: options.landing ?? { github: noGitHub },
   });
   await rt.start();
   let stopped = false;
