@@ -13,6 +13,7 @@ A provider that is not installed, not signed in, or does not offer its cheap mod
 
 ## Safety and cost
 
+- Agent CLI auto-update is switched off in every smoke config, so a run never updates your own `claude` or `codex`.
 - Everything lives in temporary folders under the OS temp directory: a throwaway `PRESTON_HOME`, throwaway git repositories and (where a push must be detectable) a local bare repository standing in for a remote.
 - Preston is started with `startDaemon` in the test process (or `preston daemon` as a child process in the restart scenario). Nothing is registered with launchd, systemd or the Task Scheduler, the real `~/.preston` is never touched, no real Discord, Slack or WeChat is contacted (the owner Channels are in-process fakes, or the terminal over IPC), and GitHub is unavailable, so nothing is pushed or opened as a pull request.
 - The agents themselves still use your real logins and their usual configuration. Their own session history therefore gets entries for the temporary folders (`~/.claude/projects`, `~/.codex/sessions`). Git is isolated from your own configuration (a throwaway identity, no hooks or signing).

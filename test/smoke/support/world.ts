@@ -184,9 +184,16 @@ export async function startWorld(options: WorldOptions): Promise<World> {
     landing: { github: noGitHub },
     initialConfig: options.chooseAgents
       ? // A fresh install: no agent chosen yet. The caller goes through the real setup steps.
-        { verification: { checkTimeoutMs: 120_000 }, ...BASE_TIMING, ...options.config }
+        {
+          // Never let a smoke run update the developer's own agent CLIs.
+          agents: { autoUpdate: false },
+          verification: { checkTimeoutMs: 120_000 },
+          ...BASE_TIMING,
+          ...options.config,
+        }
       : {
-          agents: { enabled: [options.provider] },
+          // Never let a smoke run update the developer's own agent CLIs.
+          agents: { enabled: [options.provider], autoUpdate: false },
           coordinator: { agent: scripted ? "fake" : options.provider, model, effort },
           workers: { model, effort },
           verification: { checkTimeoutMs: 120_000 },

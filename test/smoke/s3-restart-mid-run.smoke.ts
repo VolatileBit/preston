@@ -22,7 +22,7 @@ smokeScenario("s3-restart-mid-run", ["claude", "codex"], async ({ provider, star
   writeFileSync(
     join(home, "config.json"),
     JSON.stringify({
-      agents: { enabled: [provider] },
+      agents: { enabled: [provider], autoUpdate: false },
       coordinator: { agent: provider, model, effort },
       workers: { model, effort },
       verification: { checkTimeoutMs: 120_000 },
