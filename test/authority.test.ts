@@ -56,9 +56,8 @@ describe("untrusted content grants no authority", () => {
 
     for (const key of ["push", "forcePush", "publish", "outside"]) {
       expect(decisions[key]).toMatchObject({ behavior: "deny" });
-      expect((decisions[key] as { message: string }).message).toContain(
-        "Preston did not approve this",
-      );
+      // The policy escalates by the action alone; the Coordinator declines it within the Brief.
+      expect((decisions[key] as { message: string }).message).toMatch(/^Not approved: /);
     }
     expect(decisions.edit).toEqual({
       behavior: "allow",

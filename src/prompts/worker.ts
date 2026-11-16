@@ -7,6 +7,7 @@ export const WORKER_GUIDANCE = `You are working on a Goal that Preston, the user
 - Own the whole plan, implement, test and fix cycle. Work autonomously within the Brief.
 - If you need a decision you cannot settle from the Brief or the Project, call ask_preston with one clear question. If Preston says the question is parked, finish everything that does not depend on the answer, then end your turn; Preston will resume this session with the answer.
 - When the work is finished, or you are genuinely blocked, call report_result with a short summary, the checks you performed, commands Preston can run itself in this folder to verify the result, and any blockers. Preston re-runs the checks itself, so only report what you actually verified.
+- If Preston declines a request saying it has escalated it, do not work around it. Continue with everything that does not need it, then end your turn; Preston resumes this session once it is decided.
 - Stay inside this folder. Do not publish, deploy, push to shared branches, spend money or delete anything outside the Project unless the Brief's authority explicitly allows it.`;
 
 /** Returned by ask_preston when the answer needs the user. */

@@ -3,7 +3,7 @@ import { expect, inject, test } from "vitest";
 import { answers, startDaemon } from "../src/daemon/daemon.js";
 import { runTerminal } from "../src/terminal/conversation.js";
 import { fakeAdapterFactory } from "../src/workers/fake/index.js";
-import { BUILTIN_ADAPTERS } from "../src/workers/registry.js";
+import { builtinAdapters } from "../src/workers/registry.js";
 import { onCleanup, tempDir, waitFor } from "./support/harness.js";
 
 test("first run: choose the agent, hand setup to the Coordinator, chat, and leave Preston running", async () => {
@@ -17,19 +17,36 @@ test("first run: choose the agent, hand setup to the Coordinator, chat, and leav
       return "";
     },
   });
-  const daemon = await startDaemon({ home, adapters: { ...BUILTIN_ADAPTERS, fake: fake.factory } });
+  // The real adapters, on a PATH where neither agent CLI exists.
+  const real = builtinAdapters({ env: { PATH: tempDir("empty-path") } });
+  const daemon = await startDaemon({ home, adapters: { ...real, fake: fake.factory } });
   onCleanup(() => daemon.close());
 
   const input = new PassThrough();
   const output = new PassThrough();
   let screen = "";
   output.on("data", (chunk) => (screen += chunk));
-  const exit = runTerminal({ paths: daemon.paths, cliPath: inject("cliPath"), input, output });
+  const exit = runTerminal({
+    paths: daemon.paths,
+    cliPath: inject("cliPath"),
+    input,
+    output,
+    startAtLogin: async () => ({ registered: true, changed: false }),
+  });
 
   await waitFor(() => screen.includes("Shall I use Fake agent? [Y/n]"), {
     what: "the agent question",
   });
   expect(screen).toContain("Welcome to Preston. I found Fake agent (fake) on this computer.");
+  const setup = daemon.runtime.setup;
+  const agents = (await setup.state()).agents;
+  expect(agents.map((a) => [a.agent, a.installed])).toEqual([
+    ["claude", false],
+    ["codex", false],
+    ["fake", true],
+  ]);
+  expect(agents.find((a) => a.agent === "claude")?.problem).toMatch(/Claude Code isn't installed/);
+  expect(agents.find((a) => a.agent === "codex")?.problem).toMatch(/Codex isn't installed/);
   input.write("\n");
   await waitFor(() => screen.includes("Welcome! You're all set."), {
     what: "the Coordinator's welcome",

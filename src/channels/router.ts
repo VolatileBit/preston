@@ -19,6 +19,11 @@ export interface RouterDeps {
   fixed: Record<FixedWord, () => string>;
   /** Everything else from the owner. */
   toCoordinator(message: InboundMessage): void;
+  /**
+   * Gets the owner's messages first; returns true when it consumed one (an answer to a question
+   * a Channel's pairing asked in that conversation). Fixed words are never intercepted.
+   */
+  intercept?(message: InboundMessage): boolean;
 }
 
 /**
@@ -38,6 +43,7 @@ export class Router {
     }
     const word = fixedWord(message.text);
     if (!word) {
+      if (this.deps.intercept?.(message)) return;
       this.deps.toCoordinator(message);
       return;
     }

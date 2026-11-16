@@ -11,6 +11,7 @@ import { errorMessage, type Logger } from "../log.js";
 import { COORDINATOR_RUN_ID } from "../mcp/names.js";
 import type { Tokens } from "../mcp/tools.js";
 import { decide, nativeAction } from "../policy/approvals.js";
+import type { Approval } from "../policy/escalations.js";
 import { COORDINATOR_GUIDANCE } from "../prompts/coordinator.js";
 import { GRILLING_GUIDANCE } from "../prompts/grilling.js";
 import type { Questions } from "../questions/questions.js";
@@ -19,19 +20,13 @@ import type { Bucket } from "../quota/store.js";
 import { formatResetTime } from "../quota/time.js";
 import { type Db, transaction } from "../store/db.js";
 import type { ProcessTracker } from "../supervisor/processes.js";
+import type { ModelCatalog } from "../workers/models.js";
 import { type Adapters, agentLabel } from "../workers/registry.js";
 import type { AgentKind, McpLaunchSpec, RunHandle, WorkerEvent } from "../workers/types.js";
 import type { Inbox } from "./inbox.js";
 import { type CoordinatorInput, renderInput } from "./input.js";
 
-/**
- * Coordinator defaults per agent (spec: Sonnet 5.5 / GPT-6.1 Sol, medium effort). Model IDs
- * must be validated against the adapter's `listModels()` once the real adapters are integrated.
- */
-export const COORDINATOR_DEFAULTS: Partial<Record<AgentKind, { model: string; effort: string }>> = {
-  claude: { model: "sonnet", effort: "medium" },
-  codex: { model: "gpt-6.1-sol", effort: "medium" },
-};
+export { COORDINATOR_DEFAULTS } from "../workers/models.js";
 
 export interface ReplyTarget {
   channel: ChannelKind;
@@ -65,6 +60,9 @@ export interface CoordinatorDeps {
   pendingGoalEvents(): GoalEvent[];
   /** A Goal event invocation finished; the engine applies its fallback if nothing was decided. */
   goalEventHandled(event: GoalEvent): void;
+  models: ModelCatalog;
+  /** An escalated approval and the Brief authority it is judged against. */
+  approval(id: string): { approval: Approval; authority: string } | undefined;
 }
 
 type TurnEnd = Exclude<WorkerEvent, { type: "activity" | "message" | "exited" | "started" }>;
@@ -151,9 +149,20 @@ export class Coordinator {
     if (input.kind === "message" && input.inboundId !== undefined) {
       if (!this.deps.inbox.get(input.inboundId)) return; // Handled meanwhile.
     }
+    const approval = input.kind === "approval" ? this.deps.approval(input.approvalId) : undefined;
     const question =
-      input.kind === "worker_question" ? questions.find(input.questionId) : undefined;
+      input.kind === "worker_question"
+        ? questions.find(input.questionId)
+        : approval
+          ? questions.find(approval.approval.questionId)
+          : undefined;
     if (input.kind === "worker_question" && question?.state !== "pending_coordinator") return;
+    if (
+      input.kind === "approval" &&
+      (approval?.approval.state !== "pending" || question?.state !== "pending_coordinator")
+    ) {
+      return;
+    }
 
     const replyTo = replyTarget(input);
     const settings = config.get().coordinator;
@@ -193,9 +202,13 @@ export class Coordinator {
         openQuestions: questions.open(),
       },
       question,
+      approval,
     );
-    const defaults = COORDINATOR_DEFAULTS[agent];
-    const sameAgent = agent === primary;
+    // The configured model belongs to the primary agent; another agent uses its own defaults.
+    const { model, effort } = await this.deps.models.coordinator(
+      agent,
+      agent === primary ? settings : {},
+    );
     mkdirSync(this.deps.workdir, { recursive: true });
     if (input.kind === "message" && input.inboundId !== undefined) {
       this.deps.inbox.started(input.inboundId);
@@ -210,8 +223,8 @@ export class Coordinator {
         prompt,
         resumeSessionId,
         appendSystemPrompt: `${COORDINATOR_GUIDANCE}\n\n${GRILLING_GUIDANCE}`,
-        model: (sameAgent ? settings.model : undefined) ?? defaults?.model,
-        effort: (sameAgent ? settings.effort : undefined) ?? defaults?.effort,
+        model,
+        effort,
         mcp: this.deps.mcpLaunch(token),
         onApproval: async (request) =>
           decide(nativeAction(request), { workdir: this.deps.workdir }).decision,
@@ -359,8 +372,19 @@ export class Coordinator {
     if (input.kind === "goal_event") this.deps.goalEventHandled(input);
   }
 
-  /** A Worker question the Coordinator could not handle goes to the user as asked. */
+  /** A Worker question or approval the Coordinator could not handle goes to the user as asked. */
   private escalateUnhandled(input: CoordinatorInput): void {
+    if (input.kind === "approval") {
+      const approval = this.deps.approval(input.approvalId)?.approval;
+      const question = approval && this.deps.questions.find(approval.questionId);
+      if (approval?.state !== "pending" || question?.state !== "pending_coordinator") return;
+      this.deps.log.info("escalating unhandled approval", { approvalId: approval.id });
+      this.deps.questions.escalate(
+        question.id,
+        `A Worker wants to ${approval.summary}, which needs your approval because ${approval.policyReason}. Shall I allow it? Reply yes or no.`,
+      );
+      return;
+    }
     if (input.kind !== "worker_question") return;
     const question = this.deps.questions.find(input.questionId);
     if (question?.state === "pending_coordinator") {
@@ -429,6 +453,7 @@ function replyTarget(input: CoordinatorInput): ReplyTarget | undefined {
       return { channel: input.channel, conversationId: input.conversationId };
     case "worker_question":
     case "goal_event":
+    case "approval":
       return undefined;
   }
 }

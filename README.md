@@ -8,6 +8,11 @@ Preston takes ownership of an outcome you describe in plain language, hands the 
 
 You talk to Preston only through chat. There are no commands to learn.
 
+## Requirements
+
+- Node.js 22.13 or later, on macOS, Windows or Linux.
+- [Claude Code](https://claude.com/claude-code) or [Codex](https://developers.openai.com/codex), installed and signed in.
+
 ## Install
 
 ```sh
@@ -20,16 +25,33 @@ npm i -g @polyweave/preston
 preston
 ```
 
-The first time, Preston finds the coding agents installed on your computer, asks which to use, and walks you through the rest of setup in conversation. After that, `preston` opens a conversation with Preston. Tell it what you want done. Press Ctrl+C to leave; Preston keeps working in the background. Run `preston` again to pick up where you left off.
+The first time, Preston starts its background service, sets it to start by itself whenever you sign in to your computer, finds the coding agents installed, and asks which to use. Then it offers to connect a chat app, so you can talk to it away from this computer, and walks you through it step by step:
 
-You can always type `status`, `stop`, `pause` or `resume`. Preston answers these straight away, even when its own agent has run out of quota.
+- **Discord**: you create your own Discord bot and paste its token. You need a Discord server to add the bot to; you can create one for free.
+- **Slack**: Preston gives you a ready-made app manifest to paste into Slack's "Create an app" page, then asks for the two tokens Slack shows you.
+- **WeChat**: Preston shows a QR code; scan it with WeChat on your phone.
 
-## Requirements
+Any of them, or none: the terminal always works. Each one is paired with your own account, and only you can give Preston instructions there.
 
-- Node.js 22.13 or later, on macOS, Windows or Linux.
-- [Claude Code](https://claude.com/claude-code) or [Codex](https://developers.openai.com/codex), installed and signed in.
+After that, `preston` opens a conversation with Preston. Tell it what you want done. Press Ctrl+C to leave; Preston keeps working in the background. Run `preston` again to pick up where you left off, including anything left unfinished, such as scanning a new WeChat code when WeChat ended Preston's login.
 
-Preston keeps all of its state in `~/.preston` (or `$PRESTON_HOME`), never inside your projects. Its config file is readable only by you, and tokens are masked in its logs.
+You can always type `status`, `stop`, `pause` or `resume`. Preston answers these straight away, even when its own agent has run out of quota. If Preston loses a chat connection, such as its WeChat login, it shows a notification on your computer.
+
+## Where Preston keeps things
+
+All of Preston's state, config and logs live in `~/.preston` (or `$PRESTON_HOME`), never inside your projects. Its config file is readable only by you, and tokens are masked in its logs, which are in `~/.preston/logs`.
+
+To start at login, Preston registers itself with your computer's own service manager, for your user only and without administrator rights:
+
+- **macOS:** a LaunchAgent, `~/Library/LaunchAgents/ai.polyweave.preston.plist`.
+- **Linux:** a systemd user service, `~/.config/systemd/user/preston.service`. Where systemd user services are unavailable (for example in WSL or a container), it uses `~/.config/autostart/preston.desktop` on a desktop; otherwise it tells you to run `preston` after you sign in.
+- **Windows:** a scheduled task named `Preston` that runs when you sign in, or `Preston.cmd` in your Startup folder if scheduled tasks are not allowed.
+
+A different `PRESTON_HOME` gets its own registration, named with a short suffix. After upgrading Node or reinstalling Preston, run `preston` once so the registration uses the new location.
+
+## Stopping or removing Preston
+
+To stop the background service and keep it from starting at login, remove its registration: on macOS run `launchctl bootout gui/$(id -u)/ai.polyweave.preston` and delete the plist; on Linux run `systemctl --user disable --now preston.service`; on Windows run `schtasks /Delete /TN Preston /F` (or delete `Preston.cmd` from the Startup folder) and end Preston's `node` process. Running `preston` again sets it up again. To remove Preston completely, also run `npm rm -g @polyweave/preston` and delete `~/.preston`.
 
 ## Your agents and their terms
 
@@ -41,6 +63,7 @@ Preston drives your own, unmodified `claude` and `codex` CLIs under the logins y
 npm install
 npm run check   # typecheck, lint and tests
 npm run build   # compiles to dist/
+npm run test:pack   # packs, installs into a temporary prefix, runs the installed preston
 ```
 
 The [architecture](docs/architecture.md), the [glossary](CONTEXT.md) and the [decisions](docs/adr/) describe how Preston is put together.

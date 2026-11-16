@@ -587,22 +587,21 @@ class CodexRun implements RunHandle {
           })${stderrTail(this.stderr)}`;
       this.emitTerminal({ type: "failed", at: this.at(), error, retryable: !notFound });
     }
-    const exited: WorkerEvent = {
-      type: "exited",
-      at: this.at(),
-      code: exit.code,
-      signal: exit.signal,
-    };
+    this.events.push({ type: "exited", at: this.at(), code: exit.code, signal: exit.signal });
+    // Consumers may read the transcript as soon as the events end, so flush it first. `close`
+    // fires after `finish` and also after a write error, so this cannot hang.
+    const transcript = this.transcript;
+    this.transcript = undefined;
     const finish = () => {
-      this.events.push(exited);
       this.events.end();
       this.markDone();
     };
-    // The transcript is flushed before the turn is reported over, so it is complete evidence.
-    const transcript = this.transcript;
-    this.transcript = undefined;
-    if (transcript) transcript.end(finish);
-    else finish();
+    if (transcript) {
+      transcript.once("close", finish);
+      transcript.end();
+    } else {
+      finish();
+    }
   }
 }
 

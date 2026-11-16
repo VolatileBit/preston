@@ -1,8 +1,7 @@
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { configuredChannels } from "../channels/registry.js";
 import { TerminalChannel } from "../channels/terminal.js";
 import type { Channel } from "../channels/types.js";
 import { agentKindSchema } from "../config/schema.js";
@@ -11,18 +10,19 @@ import { IpcClient } from "../ipc/client.js";
 import { RPC_ERRORS, RpcCallError } from "../ipc/protocol.js";
 import { type IpcMethod, type IpcServer, startIpcServer } from "../ipc/server.js";
 import { errorMessage } from "../log.js";
+import { createHostNotifier } from "../notify/index.js";
 import { createRuntime, type Runtime, type RuntimeOptions } from "../runtime.js";
 import { newSecret } from "../util/ids.js";
 import { PRESTON_VERSION } from "../version.js";
 import { type FakeScenario, fakeAdapterFactory } from "../workers/fake/index.js";
-import { BUILTIN_ADAPTERS } from "../workers/registry.js";
+import { type AdapterFactories, BUILTIN_ADAPTERS } from "../workers/registry.js";
 import { AlreadyRunningError, acquireLock, processAlive } from "./lock.js";
 
 /** Test-only: a module whose default export is a FakeScenario. Never documented for users. */
 export const FAKE_AGENT_ENV = "PRESTON_TEST_FAKE_AGENT";
 
 export interface DaemonOptions extends Omit<RuntimeOptions, "channels"> {
-  /** Chat Channels to register next to the terminal. Defaults to those configured. */
+  /** Fixed Channels to register next to the terminal. Chat Channels are built from config. */
   channels?: Channel[];
   /** Called when a client asks the daemon to shut down. Defaults to closing it. */
   onShutdownRequest?: () => void;
@@ -38,9 +38,11 @@ export interface Daemon {
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const paths = homePaths(resolve(options.home));
   ensureHome(paths);
+  // A live owner that does not answer yet may still be starting (for example when the login
+  // service and `preston` start the daemon at the same moment), so a fresh lock is respected.
   const lock = await acquireLock(
     paths.lock,
-    async (pid) => processAlive(pid) && (await answers(paths)),
+    async (pid) => processAlive(pid) && (lockIsFresh(paths.lock) || (await answers(paths))),
   );
   const terminal = new TerminalChannel();
   let runtime: Runtime | undefined;
@@ -50,10 +52,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     runtime = await createRuntime({
       ...options,
       home: paths.root,
-      channels: ({ config, log }) => [
-        terminal,
-        ...(options.channels ?? configuredChannels(config, paths.root, log)),
-      ],
+      channels: [terminal, ...(options.channels ?? [])],
     });
     const rt = runtime;
     let closing: Promise<void> | undefined;
@@ -83,20 +82,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
 /** `preston daemon`: runs until signalled. */
 export async function runDaemonProcess(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const adapters = { ...BUILTIN_ADAPTERS };
+  let adapters: AdapterFactories = BUILTIN_ADAPTERS;
   const scenarioPath = env[FAKE_AGENT_ENV];
   if (scenarioPath) {
     const mod = (await import(pathToFileURL(resolve(scenarioPath)).href)) as {
       default?: FakeScenario;
     };
-    adapters.fake = fakeAdapterFactory(mod.default ?? (mod as FakeScenario)).factory;
+    // Test runs use only the fake agent, so they never depend on the agents of the machine.
+    adapters = { fake: fakeAdapterFactory(mod.default ?? (mod as FakeScenario)).factory };
   }
   let daemon: Daemon;
   const exit = () => {
     void daemon.close().finally(() => process.exit(0));
   };
   try {
-    daemon = await startDaemon({ home: resolveHome(env), adapters, onShutdownRequest: exit });
+    daemon = await startDaemon({
+      home: resolveHome(env),
+      adapters,
+      onShutdownRequest: exit,
+      notifyHost: createHostNotifier(),
+    });
   } catch (err) {
     if (err instanceof AlreadyRunningError) {
       process.stderr.write(`${err.message}\n`);
@@ -211,6 +216,17 @@ function ensureIpcToken(path: string): string {
   writeFileSync(path, token, { mode: 0o600 });
   chmodSync(path, 0o600);
   return token;
+}
+
+/** How long a daemon may take from taking the lock to answering on its endpoint. */
+const STARTUP_GRACE_MS = 20_000;
+
+function lockIsFresh(path: string): boolean {
+  try {
+    return Date.now() - statSync(path).mtimeMs < STARTUP_GRACE_MS;
+  } catch {
+    return false;
+  }
 }
 
 /** Whether a daemon already answers on this home's endpoint. */

@@ -50,6 +50,19 @@ export const configSchema = z.strictObject({
       workerWaitMs: z.number().int().positive().default(45_000),
     })
     .prefault({}),
+  approvals: z
+    .strictObject({
+      /**
+       * How long an escalated approval keeps the Worker waiting for a decision. After that the
+       * request is declined for now; a later "allow" resumes the Worker's Session.
+       */
+      escalationWaitMs: z
+        .number()
+        .int()
+        .positive()
+        .default(2 * 60_000),
+    })
+    .prefault({}),
   quota: z
     .strictObject({
       /** Base interval between token-free quota reads while a bucket is blocked (±jitter). */

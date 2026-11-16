@@ -1,14 +1,20 @@
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import type { ChatChannels } from "../channels/chat.js";
 import type { ChannelHub } from "../channels/hub.js";
+import { isChatChannelKind } from "../channels/registry.js";
 import { ConfigError, type ConfigManager, maskConfig } from "../config/config.js";
+import type { Config } from "../config/schema.js";
 import type { Coordinator } from "../coordinator/coordinator.js";
 import { briefSchema } from "../goals/brief.js";
 import type { GoalEngine, StrategyAction } from "../goals/engine.js";
 import { describeGoalState } from "../goals/status.js";
 import type { Goal, GoalStore } from "../goals/store.js";
+import type { Approvals } from "../policy/escalations.js";
 import type { Questions } from "../questions/questions.js";
 import type { QuotaMonitor } from "../quota/monitor.js";
-import type { Adapters } from "../workers/registry.js";
+import type { ModelCatalog } from "../workers/models.js";
+import { type Adapters, agentLabel } from "../workers/registry.js";
 import { ToolError, type ToolRegistry } from "./tools.js";
 
 export interface CoordinatorToolDeps {
@@ -20,6 +26,9 @@ export interface CoordinatorToolDeps {
   adapters: Adapters;
   hub: ChannelHub;
   quota: QuotaMonitor;
+  chat: ChatChannels;
+  models: ModelCatalog;
+  approvals: Approvals;
 }
 
 const goalId = z.string().min(1).describe("Goal ID, e.g. g-3f9a1c0b2d");
@@ -154,6 +163,12 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
     roles,
     input: z.strictObject({ questionId: z.string().min(1), answer: z.string().min(1).max(8000) }),
     handler: ({ questionId, answer }) => {
+      const approval = deps.approvals.byQuestion(questionId);
+      if (approval) {
+        throw new ToolError(
+          `Question ${questionId} is approval ${approval.id}: record the decision with approval_decide.`,
+        );
+      }
       const result = questions.answer(questionId, answer, coordinator.current()?.replyTo?.channel);
       if (!result.ok) throw new ToolError(result.reason);
       return { questionId, state: result.question.state };
@@ -234,10 +249,17 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
       patch: z.record(z.string(), z.unknown()),
       reason: z.string().min(1).max(200).default("changed in chat"),
     }),
-    handler: ({ patch, reason }) => {
+    handler: async ({ patch, reason }) => {
       try {
+        const next = config.preview(patch);
+        const warnings = await checkChange(deps, config.get(), next);
         const { version, config: updated } = config.update(patch, reason);
-        return { version, config: maskConfig(updated) };
+        await deps.chat.idle();
+        return {
+          version,
+          config: maskConfig(updated),
+          ...(warnings.length ? { warnings } : {}),
+        };
       } catch (err) {
         if (err instanceof ConfigError)
           throw new ToolError(`That change is not valid: ${err.message}`);
@@ -271,12 +293,101 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
   });
 
   registry.add({
-    name: "agents_detect",
-    description: "Which coding agent CLIs are installed and signed in on this computer.",
+    name: "approval_decide",
+    description:
+      "Decide an escalated approval (a Worker asked to do something Preston's policy does not allow on its own). Allow only when the Brief's authority clearly covers it, or the user said yes. A Worker still waiting gets the answer at once; otherwise Preston resumes it with the decision.",
     roles,
-    input: z.strictObject({}),
-    handler: async () => ({ agents: await deps.adapters.detectAll() }),
+    input: z.strictObject({
+      approvalId: z.string().min(1).describe("The approval ID (a-…), or its question ID (q-…)"),
+      allow: z.boolean(),
+      reason: z.string().min(1).max(1000).describe("Short reason, shown to the Worker"),
+    }),
+    handler: ({ approvalId, allow, reason }) => {
+      const approval = deps.approvals.find(approvalId) ?? deps.approvals.byQuestion(approvalId);
+      if (!approval) throw new ToolError(`There is no approval ${approvalId}.`);
+      const invocation = coordinator.current();
+      const waitingForUser = questions.find(approval.questionId)?.state === "pending_human";
+      if (waitingForUser && invocation?.input.kind !== "message") {
+        throw new ToolError(
+          `Approval ${approval.id} is waiting for the user. Record their answer when they reply.`,
+        );
+      }
+      const decided = deps.approvals.decide(approval.id, allow, reason, {
+        decidedBy: waitingForUser ? "human" : "coordinator",
+        via: invocation?.replyTo?.channel,
+      });
+      return { approvalId: decided.id, state: decided.state };
+    },
   });
+}
+
+/**
+ * Checks a config change against this computer before it is saved: agents must be installed,
+ * models and efforts must be offered, and Channel settings must be valid. Returns warnings
+ * for things that could not be checked; throws ToolError for a change that would not work.
+ */
+async function checkChange(
+  deps: CoordinatorToolDeps,
+  current: Config,
+  next: Config,
+): Promise<string[]> {
+  const warnings: string[] = [];
+  const problems: string[] = [];
+  const installed = async (agent: (typeof next.agents.enabled)[number]) => {
+    if (!deps.adapters.get(agent)) return `${agentLabel(agent)} isn't available in this Preston.`;
+    const detection = await deps.adapters
+      .get(agent)
+      ?.detect()
+      .catch(() => undefined);
+    return detection?.installed
+      ? undefined
+      : (detection?.problem ?? `${agentLabel(agent)} isn't installed.`);
+  };
+  for (const agent of next.agents.enabled.filter((a) => !current.agents.enabled.includes(a))) {
+    const problem = await installed(agent);
+    if (problem) problems.push(problem);
+  }
+  const coordinatorAgent = next.coordinator.agent;
+  if (coordinatorAgent && !isDeepStrictEqual(current.coordinator, next.coordinator)) {
+    if (coordinatorAgent !== current.coordinator.agent) {
+      const problem = await installed(coordinatorAgent);
+      if (problem) problems.push(problem);
+    }
+    const check = await deps.models.check(
+      coordinatorAgent,
+      next.coordinator.model,
+      next.coordinator.effort,
+    );
+    if (!check.ok) problems.push(check.reason);
+    else if (check.warning) warnings.push(check.warning);
+  }
+  const workersChanged =
+    !isDeepStrictEqual(current.workers, next.workers) ||
+    !isDeepStrictEqual(current.agents.enabled, next.agents.enabled);
+  if (workersChanged && (next.workers.model || next.workers.effort)) {
+    for (const agent of next.agents.enabled) {
+      const check = await deps.models.check(agent, next.workers.model, next.workers.effort);
+      if (!check.ok) {
+        problems.push(
+          next.agents.enabled.length > 1
+            ? `${check.reason} The Worker model and effort apply to every agent Preston uses (${next.agents.enabled.map(agentLabel).join(" and ")}); leave them unset to use each agent's own default.`
+            : check.reason,
+        );
+        break;
+      }
+      if (check.warning) warnings.push(check.warning);
+    }
+  }
+  for (const kind of new Set([...Object.keys(current.channels), ...Object.keys(next.channels)])) {
+    const section = next.channels[kind];
+    if (!isChatChannelKind(kind) || section === undefined) continue;
+    if (isDeepStrictEqual(section, current.channels[kind])) continue;
+    const problem = deps.chat.validate(kind, section);
+    if (problem)
+      problems.push(`The ${deps.chat.spec(kind).label} settings are not valid: ${problem}`);
+  }
+  if (problems.length) throw new ToolError(`I didn't change anything. ${problems.join(" ")}`);
+  return warnings;
 }
 
 function summary(goal: Goal) {

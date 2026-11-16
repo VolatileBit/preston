@@ -70,11 +70,12 @@ export function registerWorkerTools(registry: ToolRegistry, deps: WorkerToolDeps
       tool_name: z.string().min(1),
       input: z.record(z.string(), z.unknown()).default({}),
     }),
-    handler: (request, caller) => {
+    handler: async (request, caller) => {
       const action = claudeAction(request);
+      // A Worker's escalated request blocks here (bounded) while Preston decides.
       const decision =
         caller.role === "worker"
-          ? deps.engine.approve(caller.runId, action)
+          ? await deps.engine.approve(caller.runId, action)
           : decide(action, { workdir: deps.coordinatorWorkdir }).decision;
       return claudePermissionResult(decision, request);
     },

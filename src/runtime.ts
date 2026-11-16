@@ -1,6 +1,8 @@
 import { fileURLToPath } from "node:url";
-import { ChannelHub } from "./channels/hub.js";
+import { ChatChannels } from "./channels/chat.js";
+import { ChannelHub, type HostNotifier } from "./channels/hub.js";
 import { Outbox } from "./channels/outbox.js";
+import { CHAT_CHANNELS, type ChatChannelKind, type ChatChannelSpec } from "./channels/registry.js";
 import { Router } from "./channels/router.js";
 import type { Channel } from "./channels/types.js";
 import { type Clock, systemClock } from "./clock.js";
@@ -14,15 +16,19 @@ import { type Goal, GoalStore, type Run, type Verification } from "./goals/store
 import { ensureHome, type HomePaths, homePaths } from "./home.js";
 import { createLogger, type Logger, Redactor } from "./log.js";
 import { registerCoordinatorTools } from "./mcp/coordinator-tools.js";
+import { describeChannel, registerSetupTools } from "./mcp/setup-tools.js";
 import { Tokens, type ToolClient, ToolRegistry } from "./mcp/tools.js";
 import { registerWorkerTools } from "./mcp/worker-tools.js";
+import { Approvals } from "./policy/escalations.js";
 import { type Question, Questions } from "./questions/questions.js";
 import { QuotaMonitor } from "./quota/monitor.js";
 import { type Bucket, QuotaStore } from "./quota/store.js";
+import { Pairings } from "./setup/pairing.js";
 import { Setup } from "./setup/setup.js";
 import { type Db, openDatabase } from "./store/db.js";
 import { ProcessTracker } from "./supervisor/processes.js";
 import type { RunHealth } from "./supervisor/stalls.js";
+import { ModelCatalog } from "./workers/models.js";
 import {
   type AdapterFactories,
   Adapters,
@@ -37,8 +43,15 @@ export interface RuntimeOptions {
   clock?: Clock;
   /** Worker adapters by agent kind. Defaults to the built-in adapters. */
   adapters?: AdapterFactories;
-  /** Channels to register, or a function choosing them from the loaded config. */
+  /**
+   * Fixed Channels to register (the terminal, or fakes in tests), or a function choosing them
+   * from the loaded config. A chat Channel kind registered here is not built from config.
+   */
   channels?: Channel[] | ((ctx: { config: Config; log: Logger }) => Channel[]);
+  /** The chat Channels built from `config.channels`. Defaults to Discord, Slack and WeChat. */
+  chatChannels?: Record<ChatChannelKind, ChatChannelSpec>;
+  /** Desktop notifications for Channels (`ChannelContext.notifyHost`). Logged when absent. */
+  notifyHost?: HostNotifier;
   /** How agent CLIs launch `preston mcp`; `mcp --token <t>` is appended. */
   mcpCommand?: { command: string; args: string[] };
   /** Config to start from when this home has none yet. */
@@ -83,6 +96,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const paths = homePaths(options.home);
   ensureHome(paths);
   const redactor = new Redactor();
+  const addSecret = (secret: string) => redactor.add(secret);
+  let chat: ChatChannels | undefined;
   const log = createLogger({ dir: paths.logs, clock, redactor, mirror: options.logToStderr });
   const db: Db = openDatabase(paths.db);
   const config = new ConfigManager({
@@ -93,6 +108,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     initial: options.initialConfig,
     onChange: (c) => {
       for (const secret of configSecrets(c)) redactor.add(secret);
+      chat?.onConfigChange(c);
     },
   });
 
@@ -105,12 +121,23 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     env: { PRESTON_HOME: paths.root },
   });
 
-  const hub = new ChannelHub(log.child("channels"), clock);
+  const hub = new ChannelHub(log.child("channels"), clock, options.notifyHost);
   const channels =
     typeof options.channels === "function"
       ? options.channels({ config: config.get(), log: log.child("channels") })
       : (options.channels ?? []);
   for (const channel of channels) hub.register(channel);
+  chat = new ChatChannels({
+    specs: options.chatChannels ?? CHAT_CHANNELS,
+    hub,
+    config,
+    home: paths.root,
+    log: log.child("channels"),
+    addSecret,
+    fixed: new Set(channels.map((c) => c.kind)),
+  });
+  chat.init();
+  const chatChannels = chat;
   const outbox = new Outbox(db, hub, clock, log.child("outbox"), () => config.get().outbox);
   const store = new GoalStore(db, clock);
   const questions = new Questions({
@@ -129,9 +156,10 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   });
   const processes = new ProcessTracker(db, clock, log.child("processes"));
   const inbox = new Inbox(db, clock);
+  const models = new ModelCatalog({ adapters, clock, log: log.child("models") });
   // The monitor, engine and Coordinator call each other; the closures resolve after creation.
-  let engine: GoalEngine | undefined;
-  let coordinator: Coordinator | undefined;
+  let engineRef: GoalEngine | undefined;
+  let coordinatorRef: Coordinator | undefined;
   const quota = new QuotaMonitor({
     store: new QuotaStore(db, clock),
     clock,
@@ -139,11 +167,12 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     settings: () => config.get().quota,
     adapter: (kind) => adapters.get(kind),
     waitingRuns: (bucket) => store.waitingRuns(bucket).map((r) => r.id),
-    resumeRun: (runId, probe) => engine?.resumeFromQuota(runId, probe) ?? false,
-    resumeCoordinator: (probe) => coordinator?.resume(probe) ?? false,
-    stillBlocked: (bucket) => engine?.reviewWaits(bucket),
+    resumeRun: (runId, probe) => engineRef?.resumeFromQuota(runId, probe) ?? false,
+    resumeCoordinator: (probe) => coordinatorRef?.resume(probe) ?? false,
+    stillBlocked: (bucket) => engineRef?.reviewWaits(bucket),
   });
-  coordinator = new Coordinator({
+  let approvals: Approvals | undefined;
+  const coordinator = new Coordinator({
     db,
     adapters,
     config,
@@ -159,13 +188,31 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     workdir: paths.coordinator,
     transcriptsDir: paths.transcripts,
     mcpLaunch,
-    pendingGoalEvents: () => engine?.pendingGoalEvents() ?? [],
-    goalEventHandled: (event) => engine?.goalEventHandled(event),
+    models,
+    approval: (id) => {
+      const approval = approvals?.find(id);
+      if (!approval) return undefined;
+      return { approval, authority: store.findGoal(approval.goalId)?.brief.authority ?? "" };
+    },
+    pendingGoalEvents: () => engineRef?.pendingGoalEvents() ?? [],
+    goalEventHandled: (event) => engineRef?.goalEventHandled(event),
   });
-  const theCoordinator = coordinator;
-  const raiseWorkerQuestion = (question: Question) =>
-    theCoordinator.submit({ kind: "worker_question", questionId: question.id });
-  engine = new GoalEngine({
+  coordinatorRef = coordinator;
+  approvals = new Approvals({
+    db,
+    clock,
+    questions,
+    config,
+    log: log.child("approvals"),
+    raise: (approval) => coordinator.submit({ kind: "approval", approvalId: approval.id }),
+  });
+  const escalations = approvals;
+  const raiseWorkerQuestion = (question: Question) => {
+    const approval = escalations.byQuestion(question.id);
+    if (approval) escalations.raise(approval);
+    else coordinator.submit({ kind: "worker_question", questionId: question.id });
+  };
+  const engine = new GoalEngine({
     db,
     store,
     questions,
@@ -180,25 +227,46 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     adapter: (kind) => adapters.get(kind),
     mcpLaunch,
     raiseWorkerQuestion,
-    raiseGoalEvent: (event) => theCoordinator.submit({ kind: "goal_event", ...event }),
+    raiseGoalEvent: (event) => coordinator.submit({ kind: "goal_event", ...event }),
+    escalateApproval: (run, action, reason) => escalations.request(run, action, reason),
   });
-  const theEngine = engine;
+  engineRef = engine;
   registerWorkerTools(tools, {
-    engine: theEngine,
+    engine: engine,
     questions,
     config,
     coordinatorWorkdir: paths.coordinator,
     raiseWorkerQuestion,
   });
+  const pairings = new Pairings({
+    chat: chatChannels,
+    outbox,
+    log: log.child("pairing"),
+    submit: (input) => coordinator.submit(input),
+    addSecret,
+  });
   registerCoordinatorTools(tools, {
-    engine: theEngine,
+    engine,
     store,
     questions,
-    coordinator: theCoordinator,
+    coordinator,
     config,
     adapters,
     hub,
     quota,
+    chat: chatChannels,
+    models,
+    approvals: escalations,
+  });
+  registerSetupTools(tools, {
+    chat: chatChannels,
+    hub,
+    pairings,
+    config,
+    coordinator,
+    adapters,
+    models,
+    addSecret,
   });
 
   const status = () => {
@@ -212,31 +280,33 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const router = new Router({
     outbox,
     log: log.child("router"),
-    // Persisted before the Coordinator sees it; marked handled only with the reply.
+    // Persisted before the Coordinator sees it; marked handled only with the reply. Messages a
+    // pairing intercepts never reach this point, so they are neither queued nor handled twice.
     toCoordinator: (message) => {
       const inboundId = inbox.record(message);
       if (inboundId === undefined) {
         log.child("router").info("ignored a redelivered message", { channel: message.channel });
         return;
       }
-      theCoordinator.submit({ kind: "message", message, inboundId });
+      coordinator.submit({ kind: "message", message, inboundId });
     },
+    intercept: (message) => pairings.intercept(message),
     fixed: {
       status,
       stop: () => {
-        const stopped = theEngine.stopAll();
+        const stopped = engine.stopAll();
         return stopped.length
           ? `Stopped:\n${stopped.map((g) => `- ${g.brief.objective}`).join("\n")}`
           : "Nothing was running.";
       },
       pause: () => {
-        const paused = theEngine.pauseAll();
+        const paused = engine.pauseAll();
         return paused.length
           ? `Paused:\n${paused.map((g) => `- ${g.brief.objective}`).join("\n")}\nSay "resume" to continue.`
           : "Nothing to pause.";
       },
       resume: () => {
-        const resumed = theEngine.resumeAll();
+        const resumed = engine.resumeAll();
         const rechecked = quota.recheckForUser().map(agentLabel);
         const lines = resumed.length
           ? [`Resumed:\n${resumed.map((g) => `- ${g.brief.objective}`).join("\n")}`]
@@ -249,7 +319,19 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     },
   });
   hub.onInbound((message) => router.handle(message));
-  const setup = new Setup({ config, adapters, coordinator: theCoordinator });
+  const setup = new Setup({
+    config,
+    adapters,
+    coordinator,
+    channelsNeedingPairing: () =>
+      chatChannels
+        .kinds()
+        .map((kind) => describeChannel({ chat: chatChannels, hub, pairings }, kind))
+        .filter(
+          (c) => (c.state === "needs_pairing" || c.state === "invalid") && !c.pairingInProgress,
+        )
+        .map((c) => c.detail),
+  });
 
   let started = false;
   return {
@@ -267,18 +349,22 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       // Orphaned agent processes from a crashed daemon go before any Session resumes.
       const orphans = await processes.reconcile();
       if (orphans) log.warn("terminated orphaned agent processes", { count: orphans });
-      theEngine.recover();
+      engine.recover();
+      escalations.recover();
       quota.start();
-      theCoordinator.resume();
+      coordinator.resume();
     },
     async stop() {
       log.info("preston stopping");
       quota.stop();
       // Both mark themselves stopping synchronously, before parked waits are released.
-      const stopping = Promise.all([theEngine.stop(), theCoordinator.stop()]);
+      pairings.stop();
+      const stopping = Promise.all([engine.stop(), coordinator.stop()]);
       questions.releaseWaiters();
+      escalations.releaseWaiters();
       await stopping;
       await outbox.stop();
+      await chatChannels.idle();
       await hub.stop();
       db.close();
     },
@@ -289,7 +375,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     openQuestions: () => questions.open(),
     statusText: status,
     quota: () => quota.list(),
-    runHealth: (runId) => theEngine.runHealth(runId),
+    runHealth: (runId) => engine.runHealth(runId),
     trackedProcesses: () => processes.tracked(),
   };
 }

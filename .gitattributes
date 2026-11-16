@@ -1,0 +1,4 @@
+# LF everywhere, so the bin shebang, Biome formatting and fixtures behave the same on Windows.
+* text=auto eol=lf
+*.png binary
+*.webp binary

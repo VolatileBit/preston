@@ -127,7 +127,26 @@ export const MIGRATIONS: readonly string[] = [
     created_at TEXT NOT NULL
   );
   `,
-  // 2: Quota buckets and their checks, supervision counters on Runs, Goal attempts and
+  // 2: Escalated approvals. Each is linked to a Worker question, which parks and resumes the Run.
+  `
+  CREATE TABLE approvals (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id),
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    question_id TEXT NOT NULL UNIQUE REFERENCES questions(id),
+    action TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    policy_reason TEXT NOT NULL,
+    state TEXT NOT NULL,
+    decided_by TEXT,
+    decision_reason TEXT,
+    worker_told TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+  );
+  CREATE INDEX approvals_by_state ON approvals(state);
+  `,
+  // 3: Quota buckets and their checks, supervision counters on Runs, Goal attempts and
   //    idempotency keys, tracked agent processes, and durable inbound owner messages.
   `
   CREATE TABLE quota_buckets (
