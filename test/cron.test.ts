@@ -5,8 +5,8 @@ import {
   nextOccurrence,
   occurrencesBetween,
   parseCron,
-  parseInterval,
   parseInstant,
+  parseInterval,
   type Trigger,
 } from "../src/schedule/cron.js";
 

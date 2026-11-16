@@ -37,6 +37,7 @@ export function teacher(project: string, goalBrief: Record<string, unknown> = br
     async call(p: Preston, tool: string, args: Record<string, unknown> = {}) {
       const result = await run(p, tool, args);
       if (!result.ok) throw new Error(`${tool} failed: ${result.text}`);
+      // biome-ignore lint/suspicious/noExplicitAny: tests read tool results loosely
       return JSON.parse(result.text) as Record<string, any>;
     },
     /** Calls a tool that is expected to be refused and returns the reason. */

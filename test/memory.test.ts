@@ -6,13 +6,7 @@ import { GoalStore } from "../src/goals/store.js";
 import { SearchIndex } from "../src/memory/index.js";
 import { Memory } from "../src/memory/service.js";
 import { openDatabase } from "../src/store/db.js";
-import {
-  reportingWorker,
-  startPreston,
-  TEST_CONFIG,
-  tempDir,
-  waitFor,
-} from "./support/harness.js";
+import { reportingWorker, startPreston, TEST_CONFIG, tempDir, waitFor } from "./support/harness.js";
 import { teacher } from "./support/teach.js";
 
 const silent = {
@@ -143,7 +137,9 @@ describe("memory service", () => {
     await memory.upsert({ text: "I live in Lisbon." });
     appendFileSync(join(dir, "USER.md"), "- I am allergic to peanuts\n");
     expect(memory.search("peanuts")).toHaveLength(1);
-    await waitFor(() => /allergic to peanuts <!-- m-/.test(readFileSync(join(dir, "USER.md"), "utf8")));
+    await waitFor(() =>
+      /allergic to peanuts <!-- m-/.test(readFileSync(join(dir, "USER.md"), "utf8")),
+    );
     expect(memory.search("Lisbon")).toHaveLength(1);
   });
 
@@ -151,7 +147,10 @@ describe("memory service", () => {
     const dir = tempDir("memory");
     const project = tempDir("site");
     const { memory } = memoryAt(dir);
-    await memory.upsert({ text: "The staging site is staging.example.test", scope: `project:${project}` });
+    await memory.upsert({
+      text: "The staging site is staging.example.test",
+      scope: `project:${project}`,
+    });
     await memory.upsert({ text: "I prefer British spelling." });
     expect(memory.search("staging", { scope: "global" })).toHaveLength(0);
     expect(memory.search("staging", { scope: `project:${project}` })).toHaveLength(1);
@@ -236,7 +235,10 @@ describe("memory in a running Preston", () => {
     await waitFor(() => p.rt.goal(goalId)?.endedAt);
 
     const restarted = await p.restart();
-    const memory = await t.call(restarted, "memory_search", { query: "fly hosting", kinds: "memory" });
+    const memory = await t.call(restarted, "memory_search", {
+      query: "fly hosting",
+      kinds: "memory",
+    });
     expect(memory.results).toHaveLength(1);
     expect(memory.results[0].text).toBe("I deploy with Fly.io.");
 

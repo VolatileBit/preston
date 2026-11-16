@@ -103,7 +103,7 @@ export function registerScheduleTools(registry: ToolRegistry, deps: ScheduleTool
           trigger: { at: args.at, cron: args.cron, every: args.every },
           timezone: args.timezone,
           projectPath: args.projectPath,
-          job: toJob(args),
+          job: newJob(args),
           overlap: args.overlap,
           missedRun: args.missedRun,
           delivery: args.delivery,
@@ -136,7 +136,7 @@ export function registerScheduleTools(registry: ToolRegistry, deps: ScheduleTool
         const hasTrigger =
           args.at !== undefined || args.cron !== undefined || args.every !== undefined;
         const current = scheduler.require(args.id);
-        const job = args.brief || args.check ? toJob(args, current.job) : undefined;
+        const job = toJob(args, current.job);
         return summarise(
           scheduler.update(args.id, {
             name: args.name,
@@ -236,21 +236,35 @@ export function registerScheduleTools(registry: ToolRegistry, deps: ScheduleTool
   });
 }
 
+/** The job these arguments describe; undefined when they change nothing about an existing one. */
 function toJob(
   args: {
     brief?: z.infer<typeof briefSchema> | undefined;
     check?: z.infer<typeof checkJobSchema> | undefined;
     onFailure?: "goal" | "notify" | undefined;
   },
-  fallback?: Job,
-): Job {
+  current?: Job,
+): Job | undefined {
   if (args.check) {
     const onFailure = args.onFailure ?? (args.brief ? "goal" : "notify");
     return { kind: "script", check: args.check, onFailure, brief: args.brief };
   }
+  if (current?.kind === "script" && (args.brief || args.onFailure)) {
+    return {
+      ...current,
+      brief: args.brief ?? current.brief,
+      onFailure: args.onFailure ?? current.onFailure,
+    };
+  }
   if (args.brief) return { kind: "goal", brief: args.brief };
-  if (fallback) return fallback;
-  throw new ToolError("Give a brief (the Goal to start) or a check (a plain command to run).");
+  return undefined;
+}
+
+function newJob(args: Parameters<typeof toJob>[0]): Job {
+  const job = toJob(args);
+  if (!job)
+    throw new ToolError("Give a brief (the Goal to start) or a check (a plain command to run).");
+  return job;
 }
 
 function summarise(schedule: Schedule) {

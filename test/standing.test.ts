@@ -24,14 +24,18 @@ async function runGoal(
     projectPath,
     brief: brief({ objective, scope: "" }),
   });
-  await waitFor(() => p.rt.goal(goalId)?.endedAt && p.rt.goals().filter((g) => g.endedAt).length > before);
+  await waitFor(
+    () => p.rt.goal(goalId)?.endedAt && p.rt.goals().filter((g) => g.endedAt).length > before,
+  );
 }
 
 describe("standing orders", () => {
   test("ships short global defaults that reach the Coordinator and every Worker", async () => {
     const project = tempDir("project");
     const t = teacher(project);
-    const p = await startPreston({ scenario: { coordinator: t.coordinator, worker: reportingWorker } });
+    const p = await startPreston({
+      scenario: { coordinator: t.coordinator, worker: reportingWorker },
+    });
 
     const { orders } = await t.call(p, "standing_order_list");
     expect(orders.map((o: { id: string }) => o.id)).toEqual([
@@ -58,7 +62,9 @@ describe("standing orders", () => {
     const mine = tempDir("my-site");
     const other = tempDir("other-project");
     const t = teacher(mine);
-    const p = await startPreston({ scenario: { coordinator: t.coordinator, worker: reportingWorker } });
+    const p = await startPreston({
+      scenario: { coordinator: t.coordinator, worker: reportingWorker },
+    });
 
     await t.call(p, "standing_order_create", {
       title: "Keep the site accessible",
@@ -87,7 +93,9 @@ describe("standing orders", () => {
   test("disabling stops it applying and rollback brings an earlier version back", async () => {
     const project = tempDir("project");
     const t = teacher(project);
-    const p = await startPreston({ scenario: { coordinator: t.coordinator, worker: reportingWorker } });
+    const p = await startPreston({
+      scenario: { coordinator: t.coordinator, worker: reportingWorker },
+    });
 
     const created = await t.call(p, "standing_order_create", {
       title: "Tone",
@@ -120,7 +128,9 @@ describe("standing orders", () => {
   test("a default can be disabled and stays disabled across a restart", async () => {
     const project = tempDir("project");
     const t = teacher(project);
-    const p = await startPreston({ scenario: { coordinator: t.coordinator, worker: reportingWorker } });
+    const p = await startPreston({
+      scenario: { coordinator: t.coordinator, worker: reportingWorker },
+    });
     await t.call(p, "standing_order_disable", { id: "default-evidence", reason: "too strict" });
 
     const restarted = await p.restart();
@@ -133,7 +143,9 @@ describe("standing orders", () => {
     const site = tempDir("site");
     const other = tempDir("other");
     const t = teacher(site);
-    const p = await startPreston({ scenario: { coordinator: t.coordinator, worker: reportingWorker } });
+    const p = await startPreston({
+      scenario: { coordinator: t.coordinator, worker: reportingWorker },
+    });
     const policy = (path: string) => p.rt.standing.effectivePolicy({ projectPath: path });
 
     expect(policy(site).landing.autoMergePublishing).toBe(false);
@@ -164,7 +176,10 @@ describe("standing orders", () => {
     const t = teacher(project);
     const p = await startPreston({
       scenario: { coordinator: t.coordinator, worker: reportingWorker },
-      config: { ...(await import("./support/harness.js")).TEST_CONFIG, standing: { tokenBudget: 60 } },
+      config: {
+        ...(await import("./support/harness.js")).TEST_CONFIG,
+        standing: { tokenBudget: 60 },
+      },
     });
     await runGoal(p, t, project, "Anything");
     const [prompt] = workerPrompts(p);
