@@ -50,7 +50,20 @@ By default each scenario runs for the providers in this table; `SMOKE_PROVIDERS`
 
 Claude Code 2.1.325 (`haiku`), codex-cli 0.169.0 (`gpt-5.6-luna`), macOS. All scenarios passed once the defects below were fixed.
 
-RESULTS_TABLE
+| Scenario | Claude | Codex |
+|---|---|---|
+| s1-simple-goal | pass, 2 turns, 28 s, coordinator 44% of tokens | pass, 2 turns, 56 s, coordinator 27% |
+| s2-worker-question | pass, 5 turns, 34 s, coordinator 57% | pass, 5 turns, 54 s, coordinator 58% |
+| s3-restart-mid-run | pass, 3 turns, 53 s | pass, 3 turns, 73 s |
+| s4-forced-quota | pass, 2 turns, 49 s | pass, 2 turns, 53 s |
+| s4-real-quota-read | works (`claude:five_hour`, `seven_day`, ...), 1.6 s | works (`codex:primary`), 1.1 s |
+| s5-coordinator-chat | pass, 2 turns, 28 s | not run |
+| s6-untrusted-input | pass, 1 turn, 24 s | not run |
+| s6b-approval-escalation | pass, 1 turn, 11 s | pass, 1 turn, 28 s |
+
+Turns of the restart scenario are counted from the database (the child daemon is not metered), so it shows no token figures. One clean run of the suite is 17 real turns for Claude and 13 for Codex.
+
+During a full run on merged code Claude reported a real usage limit part-way through. Preston behaved as designed: the Coordinator's messages were queued with one deterministic "out of quota until ..." reply, and a Goal waited as `waiting_for_quota`. The affected scenarios were run again after the limit reset.
 
 Defects the first real run exposed, and fixed:
 
