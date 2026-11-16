@@ -2,7 +2,6 @@ import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "no
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
-import { configuredChannels } from "../channels/registry.js";
 import { TerminalChannel } from "../channels/terminal.js";
 import type { Channel } from "../channels/types.js";
 import { agentKindSchema } from "../config/schema.js";
@@ -16,14 +15,14 @@ import { createRuntime, type Runtime, type RuntimeOptions } from "../runtime.js"
 import { newSecret } from "../util/ids.js";
 import { PRESTON_VERSION } from "../version.js";
 import { type FakeScenario, fakeAdapterFactory } from "../workers/fake/index.js";
-import { BUILTIN_ADAPTERS } from "../workers/registry.js";
+import { type AdapterFactories, BUILTIN_ADAPTERS } from "../workers/registry.js";
 import { AlreadyRunningError, acquireLock, processAlive } from "./lock.js";
 
 /** Test-only: a module whose default export is a FakeScenario. Never documented for users. */
 export const FAKE_AGENT_ENV = "PRESTON_TEST_FAKE_AGENT";
 
 export interface DaemonOptions extends Omit<RuntimeOptions, "channels"> {
-  /** Chat Channels to register next to the terminal. Defaults to those configured. */
+  /** Fixed Channels to register next to the terminal. Chat Channels are built from config. */
   channels?: Channel[];
   /** Called when a client asks the daemon to shut down. Defaults to closing it. */
   onShutdownRequest?: () => void;
@@ -53,10 +52,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     runtime = await createRuntime({
       ...options,
       home: paths.root,
-      channels: ({ config, log }) => [
-        terminal,
-        ...(options.channels ?? configuredChannels(config, paths.root, log)),
-      ],
+      channels: [terminal, ...(options.channels ?? [])],
     });
     const rt = runtime;
     let closing: Promise<void> | undefined;
@@ -86,25 +82,25 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
 /** `preston daemon`: runs until signalled. */
 export async function runDaemonProcess(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const adapters = { ...BUILTIN_ADAPTERS };
+  let adapters: AdapterFactories = BUILTIN_ADAPTERS;
   const scenarioPath = env[FAKE_AGENT_ENV];
   if (scenarioPath) {
     const mod = (await import(pathToFileURL(resolve(scenarioPath)).href)) as {
       default?: FakeScenario;
     };
-    adapters.fake = fakeAdapterFactory(mod.default ?? (mod as FakeScenario)).factory;
+    // Test runs use only the fake agent, so they never depend on the agents of the machine.
+    adapters = { fake: fakeAdapterFactory(mod.default ?? (mod as FakeScenario)).factory };
   }
   let daemon: Daemon;
   const exit = () => {
     void daemon.close().finally(() => process.exit(0));
   };
   try {
-    const notifier = createHostNotifier();
     daemon = await startDaemon({
       home: resolveHome(env),
       adapters,
       onShutdownRequest: exit,
-      notifyHost: (text) => notifier.notify(text),
+      notifyHost: createHostNotifier(),
     });
   } catch (err) {
     if (err instanceof AlreadyRunningError) {

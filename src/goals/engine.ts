@@ -64,6 +64,12 @@ export interface EngineDeps {
   mcpLaunch(token: string): McpLaunchSpec;
   /** A Worker question still needs the Coordinator (used again after a restart). */
   raiseWorkerQuestion(question: Question): void;
+  /** Decides an action the policy escalated (Coordinator or user, bounded wait). */
+  escalateApproval?(
+    run: { runId: string; goalId: string },
+    action: PolicyAction,
+    policyReason: string,
+  ): Promise<ApprovalDecision>;
 }
 
 type TurnEnd = Extract<
@@ -207,10 +213,16 @@ export class GoalEngine {
     );
   }
 
-  /** Answers an agent's native approval request with the deterministic policy (ADR 0003). */
-  approve(runId: string, action: PolicyAction): ApprovalDecision {
+  /**
+   * Answers an agent's native approval request with the deterministic policy (ADR 0003).
+   * Escalations go to `escalateApproval` when provided, otherwise they are declined.
+   */
+  async approve(runId: string, action: PolicyAction): Promise<ApprovalDecision> {
     const run = this.deps.store.run(runId);
     const { decision, policy } = decide(action, { workdir: run.workdir });
+    if (policy.verdict === "escalate" && this.deps.escalateApproval) {
+      return this.deps.escalateApproval({ runId, goalId: run.goalId }, action, policy.reason);
+    }
     if (policy.verdict === "escalate") {
       recordEvent(
         this.deps.db,

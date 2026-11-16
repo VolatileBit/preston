@@ -584,9 +584,20 @@ class CodexRun implements RunHandle {
       this.emitTerminal({ type: "failed", at: this.at(), error, retryable: !notFound });
     }
     this.events.push({ type: "exited", at: this.at(), code: exit.code, signal: exit.signal });
-    this.events.end();
-    this.transcript?.end();
-    this.markDone();
+    // Consumers may read the transcript as soon as the events end, so flush it first. `close`
+    // fires after `finish` and also after a write error, so this cannot hang.
+    const transcript = this.transcript;
+    this.transcript = undefined;
+    const finish = () => {
+      this.events.end();
+      this.markDone();
+    };
+    if (transcript) {
+      transcript.once("close", finish);
+      transcript.end();
+    } else {
+      finish();
+    }
   }
 }
 

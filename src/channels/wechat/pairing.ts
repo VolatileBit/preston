@@ -11,11 +11,6 @@ import type { PairingIO } from "../types.js";
 import type { ILinkClient, QrCodeResponse } from "./api.js";
 import type { WeChatClock } from "./clock.js";
 
-/** Optional extension of PairingIO: lets WeChat ask for the number shown on the phone. */
-export interface WeChatPairingIO extends PairingIO {
-  prompt?(question: string): Promise<string>;
-}
-
 export type PairingOutcome =
   | { kind: "confirmed"; botToken: string; botId: string; ownerUserId: string; baseUrl?: string }
   | { kind: "already_bound" }
@@ -34,7 +29,7 @@ export async function pairWithQrCode(opts: {
   clock: WeChatClock;
   loginBaseUrl: string;
   localTokens: string[];
-  io: WeChatPairingIO;
+  io: PairingIO;
   log: (level: "debug" | "info" | "warn", message: string) => void;
 }): Promise<PairingOutcome> {
   const { client, clock, io } = opts;

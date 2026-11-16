@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach } from "vitest";
 import { FakeChannel } from "../../src/channels/fake/index.js";
+import type { ChatChannelKind, ChatChannelSpec } from "../../src/channels/registry.js";
 import type { Channel } from "../../src/channels/types.js";
 import type { Clock } from "../../src/clock.js";
 import type { ConfigPatch } from "../../src/config/config.js";
@@ -58,6 +59,10 @@ export async function startPreston(options: {
   clock?: Clock;
   channels?: Channel[];
   config?: ConfigPatch;
+  /** Chat Channels built from config; tests pass ones with fake transports. */
+  chatChannels?: Record<ChatChannelKind, ChatChannelSpec>;
+  /** Wraps the fake adapter (for example to add listModels). */
+  wrapAdapter?: (adapter: FakeAdapter) => FakeAdapter;
 }): Promise<Preston> {
   const home = options.home ?? tempDir("preston-home");
   const channels = options.channels ?? [new FakeChannel()];
@@ -65,8 +70,14 @@ export async function startPreston(options: {
   const rt = await createRuntime({
     home,
     clock: options.clock,
-    adapters: { fake: fake.factory },
+    adapters: {
+      fake: (ctx) => {
+        const adapter = fake.factory(ctx) as FakeAdapter;
+        return options.wrapAdapter ? options.wrapAdapter(adapter) : adapter;
+      },
+    },
     channels,
+    chatChannels: options.chatChannels,
     initialConfig: options.config ?? TEST_CONFIG,
   });
   await rt.start();
@@ -145,16 +156,36 @@ export function workerQuestionId(turn: FakeTurn): string | undefined {
   return /asks question (q-[0-9a-f]+)/.exec(turn.input.prompt)?.[1];
 }
 
-/** A Coordinator that creates a Goal with `goalBrief` in `projectPath` when told "go". */
+/** The approval ID in a Coordinator approval-request event, if this turn is one. */
+export function approvalRequestId(turn: FakeTurn): string | undefined {
+  if (!turn.input.prompt.includes('event="approval-request"')) return undefined;
+  return /asks for approval (a-[0-9a-f]+)/.exec(turn.input.prompt)?.[1];
+}
+
+/**
+ * A Coordinator that creates a Goal with `goalBrief` in `projectPath` when told "go". By
+ * default it declines escalated approvals as outside the Brief; with `approvals: "pass"` they
+ * reach `extra` like any other turn.
+ */
 export function goalCreatingCoordinator(
   projectPath: string,
   goalBrief: Record<string, unknown> = brief(),
   extra: FakeScript = () => "",
+  options: { approvals?: "decline" | "pass" } = {},
 ): FakeScript {
   return async (turn) => {
     if (ownerMessage(turn)?.trim() === "go") {
       await turn.callTool("goal_create", { projectPath, brief: goalBrief });
       return "Here's the Brief I drafted.";
+    }
+    const approvalId = approvalRequestId(turn);
+    if (approvalId && options.approvals !== "pass") {
+      await turn.callTool("approval_decide", {
+        approvalId,
+        allow: false,
+        reason: "the Brief's authority does not cover it",
+      });
+      return "";
     }
     return extra(turn);
   };

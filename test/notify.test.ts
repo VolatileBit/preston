@@ -153,12 +153,13 @@ test("a Channel's notifyHost reaches the runtime's host notifier", async () => {
     adapters: {},
     channels: [channel],
     initialConfig: TEST_CONFIG,
-    notifyHost: (text) => shown.push(text),
+    notifyHost: { notify: (text) => shown.push(text) },
   });
   await rt.start();
   onCleanup(() => rt.stop());
 
   ctx?.notifyHost("Preston lost its WeChat connection — run `preston` to reconnect.");
+  await Promise.resolve();
 
   expect(shown).toEqual(["Preston lost its WeChat connection — run `preston` to reconnect."]);
 });
