@@ -124,7 +124,10 @@ smokeScenario("s4-forced-quota", ["claude", "codex"], async ({ provider }) => {
   expect(reads).toBeGreaterThan(0);
   expect(rt.quota().find((b) => b.bucket === bucket)?.state).toBe("available");
   const workerTurns = world.agent.turnsOf("worker");
-  expect(workerTurns).toHaveLength(2);
+  // A later turn can follow if the Worker's own report needs fixing (Preston resumes it with the
+  // failing check); every turn after the first continues the same Session.
+  expect(workerTurns.length).toBeGreaterThanOrEqual(2);
+  for (const turn of workerTurns.slice(1)) expect(turn.resumedFrom).toBe(sessionBefore);
   expect(workerTurns[1]?.resumedFrom).toBe(sessionBefore);
   expect(workerTurns[1]?.sessionId).toBe(sessionBefore);
   expect(workerTurns[1]?.prompt).toMatch(/quota restored/i);
