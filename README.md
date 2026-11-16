@@ -37,6 +37,14 @@ After that, `preston` opens a conversation with Preston. Tell it what you want d
 
 You can always type `status`, `stop`, `pause` or `resume`. Preston answers these straight away, even when its own agent has run out of quota. If Preston loses a chat connection, such as its WeChat login, it shows a notification on your computer.
 
+## Teach Preston by chatting: standing orders, schedules, memory
+
+Everything below is done by telling Preston, not by editing files.
+
+- **Standing orders** are lasting rules about how Preston works: "ask before spending anything", "in my website folder always check accessibility", "merge routine PRs without asking". Preston starts with a few sensible ones (own the objective, recover from routine problems itself, ask you only when it really needs you, prove results, keep messages short). Ask to see, change, switch off or roll back any of them, including those.
+- **Schedules** make Preston do something later or on a repeat: "every weekday at 9 check the build", "on Friday at 4pm summarise the week". Each time, Preston starts a normal Goal. It can also run a plain check and speak up only when it fails. If your computer was asleep or off at the time, Preston catches up once when it is back (or skips, if you prefer); it can't run anything while the computer is asleep. Ask it to pause, resume, run now, or show what happened.
+- **Memory** is what Preston remembers about you: preferences and facts you tell it ("I prefer short replies", "my staging site is..."). It is kept as readable text in `~/.preston/memory` that you can edit, and it never stores passwords or keys. Ask it to forget something and it does.
+
 ## Where Preston keeps things
 
 All of Preston's state, config and logs live in `~/.preston` (or `$PRESTON_HOME`), never inside your projects. Its config file is readable only by you, and tokens are masked in its logs, which are in `~/.preston/logs`.

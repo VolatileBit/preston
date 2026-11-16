@@ -34,6 +34,20 @@ _Avoid_: Thread, conversation (for the agent side)
 Preston's own reasoning step, invoked only when a decision adds value, never to relay routine messages to a Worker.
 _Avoid_: Supervisor, orchestrator loop, manager
 
+### Teaching
+
+**Standing order**:
+A persistent rule about how Preston works, in the user's words, that applies wherever its scope matches. It governs behaviour and never starts work by itself.
+_Avoid_: Policy, rule, preference
+
+**Schedule**:
+A durable instruction to start a Goal, or run a plain check, at a time or on a repeat. Each run that starts a Goal creates a new Goal; the Schedule itself never finishes like a Goal does.
+_Avoid_: Cron job, recurring goal, reminder
+
+**Memory**:
+A lasting fact or preference the user told Preston, kept across Goals. It is not progress on any work.
+_Avoid_: Notes, context, knowledge base
+
 ### Communication
 
 **Channel**:
