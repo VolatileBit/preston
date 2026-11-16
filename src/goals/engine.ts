@@ -1,8 +1,10 @@
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { Outbox } from "../channels/outbox.js";
 import { type Clock, isoNow, type Timer } from "../clock.js";
 import type { ConfigManager } from "../config/config.js";
+import type { LandingHooks } from "../landing/hooks.js";
+import { canonicalPath } from "../landing/paths.js";
 import { errorMessage, type Logger } from "../log.js";
 import { type Tokens, ToolError } from "../mcp/tools.js";
 import { decide, nativeAction } from "../policy/approvals.js";
@@ -92,6 +94,8 @@ export interface EngineDeps {
   processes: ProcessTracker;
   adapter(kind: AgentKind): WorkerAdapter | undefined;
   mcpLaunch(token: string): McpLaunchSpec;
+  /** Worktrees and landing (`src/landing`). Without it Goals work in the Project folder. */
+  landing?: LandingHooks;
   /** A Worker question still needs the Coordinator (used again after a restart). */
   raiseWorkerQuestion(question: Question): void;
   /** Asks the Coordinator how a stuck Goal should continue. */
@@ -140,6 +144,7 @@ export class GoalEngine {
 
   constructor(private readonly deps: EngineDeps) {
     deps.questions.onAnswered((question) => this.onAnswered(question));
+    deps.questions.onAnswered((question) => this.onLandingAnswered(question));
     this.watch = new StallWatch(
       deps.clock,
       () => deps.config.get().supervision,
@@ -157,7 +162,7 @@ export class GoalEngine {
     /** Idempotency key: the same key and objective return the Goal already created. */
     sourceKey?: string | undefined;
   }): Goal {
-    const projectPath = resolve(input.projectPath);
+    const projectPath = canonicalPath(input.projectPath);
     if (!isAbsolute(input.projectPath)) {
       throw new ToolError("projectPath must be an absolute path to a folder on this computer.");
     }
@@ -242,7 +247,11 @@ export class GoalEngine {
         // Still winding down from the pause; the turn's end continues it.
         this.deps.store.setGoalState(goal.id, "running");
       } else {
-        this.nextStep(this.deps.store.goal(goal.id), run, RESUME_AFTER_PAUSE_PROMPT);
+        this.nextStep(
+          this.deps.store.goal(goal.id),
+          run,
+          run.sessionId ? RESUME_AFTER_PAUSE_PROMPT : renderBrief(goal.id, goal.brief),
+        );
       }
     }
     return paused;
@@ -421,12 +430,17 @@ export class GoalEngine {
           else this.startNewRun(goal.id, this.pickAgentOr(goal));
           break;
         case "verifying":
-          if (run?.reportPending) this.verify(goal.id, run.id);
+          if (this.deps.landing?.isLanding(goal.id)) this.landWork(goal.id);
+          else if (run?.reportPending) this.verify(goal.id, run.id);
           else if (run) this.recoverRun(goal, run, "Preston restarted");
           else this.startNewRun(goal.id, this.pickAgentOr(goal));
           break;
         case "waiting_for_user":
           if (!run) break;
+          if (this.deps.landing?.isLanding(goal.id)) {
+            this.landWork(goal.id);
+            break;
+          }
           for (const q of this.deps.questions.forRun(run.id).open) {
             if (q.state === "pending_coordinator") this.deps.raiseWorkerQuestion(q);
           }
@@ -450,6 +464,7 @@ export class GoalEngine {
     for (const timer of this.wakeTimers.values()) timer.cancel();
     this.wakeTimers.clear();
     for (const abort of this.checkAborts.values()) abort.abort();
+    this.deps.landing?.abort();
     await Promise.allSettled([...this.live.values()].map((h) => h.interrupt()));
     await Promise.allSettled([...this.tasks]);
   }
@@ -522,8 +537,25 @@ export class GoalEngine {
 
   private async executeTurn(runId: string, prompt: string): Promise<void> {
     const { store, tokens, config, quota } = this.deps;
-    const run = store.run(runId);
+    let run = store.run(runId);
     const goal = store.goal(run.goalId);
+    // The Goal's own working copy (a worktree), created or reused here, before every turn.
+    const workspace = await this.deps.landing?.prepare(goal, run);
+    const now = store.goal(goal.id).state;
+    if (this.stopping || isTerminal(now)) return;
+    if (now === "paused") {
+      // Paused while the working copy was being made: nothing has started yet.
+      store.updateRun(runId, { state: "parked" });
+      return;
+    }
+    if (workspace && !workspace.ok) {
+      this.fail(goal, run, "blocked", workspace.reason);
+      return;
+    }
+    if (workspace && workspace.workdir !== run.workdir) {
+      store.updateRun(runId, { workdir: workspace.workdir });
+      run = store.run(runId);
+    }
     const adapter = this.deps.adapter(run.agent);
     if (!adapter) {
       this.fail(goal, run, "failed", `${agentLabel(run.agent)} is not available on this computer.`);
@@ -543,7 +575,9 @@ export class GoalEngine {
         workdir: run.workdir,
         prompt,
         resumeSessionId: run.sessionId ?? undefined,
-        appendSystemPrompt: WORKER_GUIDANCE,
+        appendSystemPrompt: workspace?.guidance
+          ? `${WORKER_GUIDANCE}\n\n${workspace.guidance}`
+          : WORKER_GUIDANCE,
         model: settings.model,
         effort: settings.effort,
         mcp: this.deps.mcpLaunch(token),
@@ -1161,11 +1195,77 @@ export class GoalEngine {
     report: WorkerReport | null,
   ): void {
     const verified = results.some((r) => r.source === "brief") && results.every((r) => r.passed);
+    if (verified && this.deps.landing?.usesWorktree(goal.id)) {
+      this.landWork(goal.id);
+      return;
+    }
+    const base = verified
+      ? verifiedMessage(goal, results, report)
+      : unverifiedMessage(goal, report);
+    const note = this.deps.landing?.outcomeNote(goal);
     this.finish(goal, run, {
       state: "completed",
       outcome: verified ? "verified" : "unverified",
-      message: verified ? verifiedMessage(goal, results, report) : unverifiedMessage(goal, report),
+      message: note ? `${base}\n${note}` : base,
     });
+  }
+
+  // ---- Landing -----------------------------------------------------------------------------
+
+  /** Lands the verified work of a Goal that has its own worktree, then finishes the Goal. */
+  private landWork(goalId: string): void {
+    const run = this.deps.store.currentRun(goalId);
+    if (!run) return;
+    this.deps.store.setGoalState(goalId, "verifying", { detail: "Merging the finished work." });
+    this.track(this.runLanding(goalId, run.id), "landing failed", { goalId });
+  }
+
+  private async runLanding(goalId: string, runId: string): Promise<void> {
+    const { store, landing } = this.deps;
+    if (!landing) return;
+    const result = await landing.land(store.goal(goalId), store.run(runId));
+    if (this.stopping || result.kind === "aborted") return;
+    const goal = store.goal(goalId);
+    const run = store.run(runId);
+    if (goal.state !== "verifying") return;
+    switch (result.kind) {
+      case "landed":
+      case "held": {
+        const results =
+          store
+            .verifications(goalId)
+            .filter((v) => v.passed)
+            .at(-1)?.results ?? [];
+        this.finish(goal, run, {
+          state: "completed",
+          outcome: "verified",
+          message: [verifiedMessage(goal, results, run.report), result.message]
+            .filter(Boolean)
+            .join("\n"),
+        });
+        return;
+      }
+      case "needs_worker":
+        recordEvent(this.deps.db, this.deps.clock, "landing_needs_worker", { goalId, runId });
+        this.resumeRun(run, result.prompt);
+        return;
+      case "waiting_for_user":
+        store.updateRun(runId, { state: "parked" });
+        store.setGoalState(goalId, "waiting_for_user", {
+          detail: "Waiting for your answer before merging.",
+        });
+        return;
+      case "blocked":
+        this.fail(goal, run, "blocked", result.reason);
+        return;
+    }
+  }
+
+  /** The user answered the question a landing was waiting on: carry on landing. */
+  private onLandingAnswered(question: Question): void {
+    const goalId = this.deps.landing?.questionGoal(question.id);
+    if (!goalId || this.stopping) return;
+    if (this.deps.store.findGoal(goalId)?.state === "waiting_for_user") this.landWork(goalId);
   }
 
   private fail(goal: Goal, run: Run, state: "blocked" | "failed", reason: string): void {
@@ -1224,6 +1324,7 @@ export class GoalEngine {
     this.wakeTimers.get(goalId)?.cancel();
     this.wakeTimers.delete(goalId);
     this.checkAborts.get(goalId)?.abort();
+    this.deps.landing?.abort(goalId);
     const handle = run ? this.live.get(run.id) : undefined;
     if (!run || !handle) return;
     this.interrupted.add(run.id);

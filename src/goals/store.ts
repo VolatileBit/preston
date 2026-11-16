@@ -385,6 +385,7 @@ export class GoalStore {
       stalls: number;
       strategyPending: boolean;
       lastMessage: string;
+      workdir: string;
     }>,
   ): void {
     const columns: Record<string, string> = {
@@ -403,6 +404,7 @@ export class GoalStore {
       stalls: "stalls",
       strategyPending: "strategy_pending",
       lastMessage: "last_message",
+      workdir: "workdir",
     };
     const sets: string[] = ["updated_at = :at"];
     const params: Record<string, string | number | null> = { id, at: this.now() };

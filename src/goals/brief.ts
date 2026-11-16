@@ -23,6 +23,23 @@ export const briefSchema = z.strictObject({
       "Work inside the Project only. Do not publish, deploy, push, spend money, or delete anything outside the Project.",
     )
     .describe("Limits of authority: what the Worker may do without asking"),
+  workspace: z
+    .strictObject({
+      startFrom: z
+        .enum(["default", "current"])
+        .default("default")
+        .describe(
+          "Which branch the work starts from and lands on: the project's main branch, or the branch the user has checked out now",
+        ),
+      allowInPlace: z
+        .boolean()
+        .default(false)
+        .describe(
+          "True only if the user agreed that Preston may edit the project folder directly when a separate working copy cannot be made",
+        ),
+    })
+    .optional()
+    .describe("Where the work happens in a Git project (optional; the defaults are right)"),
 });
 
 export type Brief = z.infer<typeof briefSchema>;

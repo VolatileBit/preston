@@ -1,3 +1,5 @@
+import { LANDING_MIGRATION } from "../landing/migration.js";
+
 /**
  * Forward-only, numbered schema migrations. Migration N is `MIGRATIONS[N - 1]` and the applied
  * version is kept in `PRAGMA user_version`. Never edit a released migration; append a new one.
@@ -210,4 +212,6 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX inbound_by_state ON inbound_messages(state);
   `,
+  // 4: Projects' inspected state, Goal working copies (worktrees) and landing of the work.
+  LANDING_MIGRATION,
 ];

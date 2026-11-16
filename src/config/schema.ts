@@ -97,6 +97,25 @@ export const configSchema = z.strictObject({
       maxStrategyChanges: z.number().int().min(0).max(5).default(2),
     })
     .prefault({}),
+  landing: z
+    .strictObject({
+      /** How finished work is merged: a merge commit, or one squashed commit. */
+      mergeMethod: z.enum(["merge", "squash"]).default("merge"),
+      /**
+       * Merge without asking even when the merge would also publish something (deploy a site,
+       * release a build, publish a package). Off: Preston asks first.
+       */
+      autoMergePublishing: z.boolean().default(false),
+      /** How long to wait for a pull request's required checks before reporting Blocked. */
+      requireCiWaitMs: ms(30 * MINUTE),
+      /** How often those checks are looked at (no model is involved). */
+      ciPollIntervalMs: ms(20_000),
+      /** How long to wait for checks to appear on a new pull request before assuming none. */
+      ciStartGraceMs: z.number().int().min(0).default(90_000),
+      /** Times the Worker is re-run to fix a merge conflict or a failure found while landing. */
+      conflictFixAttempts: z.number().int().min(0).max(3).default(1),
+    })
+    .prefault({}),
   outbox: z
     .strictObject({
       maxAttempts: z.number().int().positive().default(8),

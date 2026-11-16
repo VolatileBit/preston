@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ChatChannels } from "./channels/chat.js";
 import { ChannelHub, type HostNotifier } from "./channels/hub.js";
@@ -14,6 +15,10 @@ import { GoalEngine } from "./goals/engine.js";
 import { type AgentBlock, statusText } from "./goals/status.js";
 import { type Goal, GoalStore, type Run, type Verification } from "./goals/store.js";
 import { ensureHome, type HomePaths, homePaths } from "./home.js";
+import type { Exec } from "./landing/exec.js";
+import { createGhClient, type GitHubClient } from "./landing/github.js";
+import { Landing } from "./landing/landing.js";
+import { registerLandingTools } from "./landing/tools.js";
 import { createLogger, type Logger, Redactor } from "./log.js";
 import { registerCoordinatorTools } from "./mcp/coordinator-tools.js";
 import { describeChannel, registerSetupTools } from "./mcp/setup-tools.js";
@@ -58,6 +63,8 @@ export interface RuntimeOptions {
   initialConfig?: ConfigPatch;
   /** Mirror log lines to stderr. */
   logToStderr?: boolean;
+  /** How finished work is landed: the GitHub client (default: the `gh` program) and the runner. */
+  landing?: { github?: GitHubClient; exec?: Exec };
 }
 
 /** A running Preston: everything the daemon owns, without the IPC endpoint. */
@@ -212,6 +219,17 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     if (approval) escalations.raise(approval);
     else coordinator.submit({ kind: "worker_question", questionId: question.id });
   };
+  const landing = new Landing({
+    db,
+    clock,
+    log: log.child("landing"),
+    config,
+    goals: store,
+    questions,
+    worktreesDir: join(paths.root, "worktrees"),
+    github: options.landing?.github ?? createGhClient(options.landing?.exec),
+    ...(options.landing?.exec ? { exec: options.landing.exec } : {}),
+  });
   const engine = new GoalEngine({
     db,
     store,
@@ -226,6 +244,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     processes,
     adapter: (kind) => adapters.get(kind),
     mcpLaunch,
+    landing,
     raiseWorkerQuestion,
     raiseGoalEvent: (event) => coordinator.submit({ kind: "goal_event", ...event }),
     escalateApproval: (run, action, reason) => escalations.request(run, action, reason),
@@ -258,6 +277,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     models,
     approvals: escalations,
   });
+  registerLandingTools(tools, { landing });
   registerSetupTools(tools, {
     chat: chatChannels,
     hub,
