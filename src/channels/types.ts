@@ -50,6 +50,21 @@ export interface ChannelContext {
   log(level: "debug" | "info" | "warn" | "error", message: string, data?: unknown): void;
 }
 
+/** I/O the setup conversation lends a Channel while pairing it with the owner. */
+export interface PairingIO {
+  /** Show text to the user in the setup conversation (QR codes are rendered as text). */
+  show(text: string): void;
+  signal: AbortSignal;
+}
+
+export interface PairingResult {
+  ok: boolean;
+  /** Plain-language outcome for the user. */
+  detail: string;
+  /** Channel config to persist (owner identity, default conversation, credentials). */
+  configPatch?: Record<string, unknown>;
+}
+
 export interface Channel {
   readonly kind: ChannelKind;
   readonly capabilities: ChannelCapabilities;
@@ -58,4 +73,6 @@ export interface Channel {
   send(message: OutboundMessage): Promise<DeliveryResult>;
   /** Mark a delivered question as answered without notifying (reactions). */
   markAnswered?(ref: string): Promise<void>;
+  /** Pair the owner's account (QR scan, pairing code, ...). */
+  pair?(io: PairingIO): Promise<PairingResult>;
 }

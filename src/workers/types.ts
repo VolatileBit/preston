@@ -116,6 +116,13 @@ export interface RunHandle {
   interrupt(): Promise<void>;
 }
 
+export interface UpdateResult {
+  updated: boolean;
+  fromVersion?: string;
+  toVersion?: string;
+  detail: string;
+}
+
 export interface WorkerAdapter {
   readonly agent: AgentKind;
   detect(): Promise<AgentDetection>;
@@ -123,4 +130,6 @@ export interface WorkerAdapter {
   /** Token-free quota read, where the provider supports one. */
   readQuota?(): Promise<QuotaReading[]>;
   listModels?(): Promise<ModelInfo[]>;
+  /** Bring the CLI up to date using its own updater. Only called when no Run uses this CLI. */
+  update?(): Promise<UpdateResult>;
 }
