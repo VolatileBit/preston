@@ -30,7 +30,14 @@ export const configSchema = z.strictObject({
       ...modelSettings,
     })
     .prefault({}),
-  workers: z.strictObject(modelSettings).prefault({}),
+  workers: z
+    .strictObject({
+      ...modelSettings,
+      /** Settings for Workers on one agent; they win over the two above for that agent. */
+      claude: z.strictObject(modelSettings).optional(),
+      codex: z.strictObject(modelSettings).optional(),
+    })
+    .prefault({}),
   verification: z
     .strictObject({
       checkTimeoutMs: z.number().int().positive().default(600_000),
@@ -169,6 +176,18 @@ export const configSchema = z.strictObject({
 });
 
 export type Config = z.infer<typeof configSchema>;
+
+/**
+ * The model and effort for a Worker on `agent`: that agent's own setting, else the general one,
+ * else unset (the user's own CLI configuration applies).
+ */
+export function workerSettings(
+  workers: Config["workers"],
+  agent: z.infer<typeof agentKindSchema>,
+): { model?: string | undefined; effort?: string | undefined } {
+  const own = agent === "claude" || agent === "codex" ? workers[agent] : undefined;
+  return { model: own?.model ?? workers.model, effort: own?.effort ?? workers.effort };
+}
 
 export function defaultConfig(): Config {
   return configSchema.parse({});

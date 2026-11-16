@@ -4,7 +4,7 @@ import type { ChatChannels } from "../channels/chat.js";
 import type { ChannelHub } from "../channels/hub.js";
 import { isChatChannelKind } from "../channels/registry.js";
 import { ConfigError, type ConfigManager, maskConfig } from "../config/config.js";
-import type { Config } from "../config/schema.js";
+import { type Config, workerSettings } from "../config/schema.js";
 import type { Coordinator } from "../coordinator/coordinator.js";
 import { briefSchema } from "../goals/brief.js";
 import type { GoalEngine, StrategyAction } from "../goals/engine.js";
@@ -389,13 +389,17 @@ async function checkChange(
   const workersChanged =
     !isDeepStrictEqual(current.workers, next.workers) ||
     !isDeepStrictEqual(current.agents.enabled, next.agents.enabled);
-  if (workersChanged && (next.workers.model || next.workers.effort)) {
+  if (workersChanged) {
     for (const agent of next.agents.enabled) {
-      const check = await deps.models.check(agent, next.workers.model, next.workers.effort);
+      const { model, effort } = workerSettings(next.workers, agent);
+      if (!model && !effort) continue;
+      const check = await deps.models.check(agent, model, effort);
       if (!check.ok) {
+        const own = agent === "claude" || agent === "codex" ? next.workers[agent] : undefined;
+        const general = (model && !own?.model) || (effort && !own?.effort);
         problems.push(
-          next.agents.enabled.length > 1
-            ? `${check.reason} The Worker model and effort apply to every agent Preston uses (${next.agents.enabled.map(agentLabel).join(" and ")}); leave them unset to use each agent's own default.`
+          general && next.agents.enabled.length > 1
+            ? `${check.reason} The Worker model and effort apply to every agent Preston uses (${next.agents.enabled.map(agentLabel).join(" and ")}) unless set for one agent (workers.claude or workers.codex); leave them unset to use each agent's own default.`
             : check.reason,
         );
         break;

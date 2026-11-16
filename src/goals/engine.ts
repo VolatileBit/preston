@@ -3,6 +3,7 @@ import { isAbsolute, join } from "node:path";
 import type { Outbox } from "../channels/outbox.js";
 import { type Clock, isoNow, type Timer } from "../clock.js";
 import type { ConfigManager } from "../config/config.js";
+import { workerSettings } from "../config/schema.js";
 import type { LandingHooks } from "../landing/hooks.js";
 import { canonicalPath } from "../landing/paths.js";
 import { errorMessage, type Logger } from "../log.js";
@@ -622,7 +623,7 @@ export class GoalEngine {
     store.updateRun(runId, { state: "active", turns: turn });
     mkdirSync(run.transcriptDir, { recursive: true });
     const token = tokens.mint({ role: "worker", runId, goalId: goal.id });
-    const settings = config.get().workers;
+    const settings = workerSettings(config.get().workers, run.agent);
     let end: TurnEnd | undefined;
     let trackedPid: number | undefined;
     let tracking: Promise<void> = Promise.resolve();
