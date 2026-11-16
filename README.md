@@ -69,6 +69,10 @@ To stop the background service and keep it from starting at login, remove its re
 
 Preston drives your own, unmodified `claude` and `codex` CLIs under the logins you already have. It never reads, stores or forwards your credentials. Anthropic's terms let you use Claude Code with your own subscription. They also expect plan limits to reflect ordinary, individual usage, and long unattended work may sit uneasily with that. OpenAI allows ChatGPT-plan use in open-source, locally run tools through the Codex App Server. Check the current terms for your plan.
 
+## Keeping your agents current
+
+Preston keeps your agent CLIs up to date: about once a day, and only when no work is using that CLI, it runs the CLI's own updater and checks that it still starts and is still signed in. It never uses administrator rights; if you installed a CLI with Homebrew, apt, winget or similar, it says so in `status` and leaves it to you. To stop automatic updates, tell Preston so (it sets `agents.autoUpdate` to false).
+
 ## Development
 
 ```sh

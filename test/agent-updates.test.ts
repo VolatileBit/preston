@@ -404,7 +404,7 @@ describe("Sessions after the CLI changed version", () => {
         return "Passing that on.";
       }),
       worker: async (turn) => {
-        if (turn.turn === 1 && !turn.resumed) {
+        if (turn.turn === 1 && !turn.input.prompt.includes("Handover")) {
           await turn.callTool("ask_preston", { question: "Blue or green button?" });
           turn.message("Waiting for the colour.");
           return "Parked until I hear back.";
