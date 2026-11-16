@@ -22,6 +22,7 @@ import {
   inPlaceNote,
   landedLocally,
   landedOnGitHub,
+  leftOutNote,
   mergeCommitMessage,
   nothingToLand,
   parseYesNo,
@@ -38,6 +39,7 @@ import {
   type PublishingVerdict,
   type RepoSnapshot,
 } from "./publishing.js";
+import { stageWork } from "./stage.js";
 import { LandingStore, type Workspace } from "./store.js";
 import { Workspaces } from "./workspace.js";
 
@@ -164,7 +166,7 @@ export class Landing implements LandingHooks {
     try {
       for (let attempt = 1; ; attempt++) {
         try {
-          return this.settle(goal.id, await this.execute(ctx));
+          return this.settle(goal.id, this.withLeftOut(ctx, await this.execute(ctx)));
         } catch (err) {
           if (controller.signal.aborted) return { kind: "aborted" };
           this.deps.log.warn("landing step failed", { goalId: goal.id, attempt, error: err });
@@ -224,8 +226,9 @@ export class Landing implements LandingHooks {
     const { git } = this;
     const path = ctx.ws.worktreePath;
     if (!(await git.dirty(path))) return undefined;
-    const added = await git.run(path, ["add", "-A"]);
-    if (added.code !== 0) return gitProblem(added);
+    const staged = await stageWork(git, path);
+    if (staged.problem) return staged.problem;
+    this.store.updateLanding(ctx.goal.id, { leftOut: staged.leftOut });
     // Exit 0 means nothing is staged (only ignored files changed).
     if (await git.ok(path, ["diff", "--cached", "--quiet"])) return undefined;
     const identity = await git.identityArgs(path);
@@ -236,6 +239,25 @@ export class Landing implements LandingHooks {
       commitMessage(ctx.goal.brief),
     ]);
     return committed.code === 0 ? undefined : gitProblem(committed);
+  }
+
+  /** Tells the user what was not committed, in the outcome of work that was merged or held. */
+  private withLeftOut(ctx: Ctx, result: LandResult): LandResult {
+    if (result.kind !== "landed" && result.kind !== "held") return result;
+    const leftOut = this.require(ctx).leftOut;
+    if (!leftOut.length) return result;
+    const note = leftOutNote(leftOut, this.keepsFolder(ctx) ? ctx.ws.worktreePath : null);
+    return { ...result, message: [result.message, note].filter(Boolean).join("\n") };
+  }
+
+  /** A large file was left out of the merge: its folder is kept, so the file is not lost. */
+  private keepsFolder(ctx: Ctx): boolean {
+    return this.require(ctx).leftOut.some((l) => l.why === "large_binary");
+  }
+
+  /** Removes the Goal's worktree and branch once everything in them is merged. */
+  private async tidy(ctx: Ctx): Promise<void> {
+    if (!this.keepsFolder(ctx)) await this.workspaces.cleanup(ctx.ws, { deleteBranch: true });
   }
 
   /** Pull request when the repository has a usable GitHub remote, otherwise a local merge. */
@@ -362,7 +384,7 @@ export class Landing implements LandingHooks {
     note: string | null,
   ): Promise<LandResult> {
     const currentBranch = await this.git.currentBranch(ctx.ws.repoRoot);
-    await this.workspaces.cleanup(ctx.ws, { deleteBranch: true });
+    await this.tidy(ctx);
     return {
       kind: "landed",
       message: landedLocally({ base: ctx.ws.baseBranch, checkout, currentBranch, note }),
@@ -522,7 +544,7 @@ export class Landing implements LandingHooks {
     if (fetched.code === 0) local = await this.catchUp(root, remote, base);
     // Best effort: the remote copy of the branch is done with.
     await git.run(root, ["push", remote, "--delete", branch], { timeoutMs: 120_000 });
-    await this.workspaces.cleanup(ctx.ws, { deleteBranch: true });
+    await this.tidy(ctx);
     return { kind: "landed", message: landedOnGitHub({ url: pr.url, base, local }) };
   }
 
@@ -598,7 +620,7 @@ export class Landing implements LandingHooks {
     }
     const head = (await git.rev(path, "HEAD")) ?? "";
     if ((await git.out(root, ["rev-list", "--count", `${baseTip}..${head}`])) === "0") {
-      await this.workspaces.cleanup(ctx.ws, { deleteBranch: true });
+      await this.tidy(ctx);
       return { result: { kind: "landed", message: nothingToLand(base) } };
     }
     if (

@@ -276,4 +276,8 @@ export const MIGRATIONS: readonly string[] = [
   `,
   // 5: Projects' inspected state, Goal working copies (worktrees) and landing of the work.
   LANDING_MIGRATION,
+  // 6: What landing left out of a commit (generated folders, large binary files).
+  `
+  ALTER TABLE landings ADD COLUMN left_out TEXT;
+  `,
 ];

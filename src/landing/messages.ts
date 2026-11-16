@@ -2,6 +2,7 @@ import type { Brief } from "../goals/brief.js";
 import type { CheckResult } from "../goals/checks.js";
 import type { Goal, WorkerReport } from "../goals/store.js";
 import type { PublishingVerdict } from "./publishing.js";
+import type { LeftOut } from "./stage.js";
 
 /** Everything landing tells the user or the Worker, in plain words. */
 
@@ -83,6 +84,31 @@ export function parseYesNo(answer: string): "yes" | "no" {
   )
     ? "yes"
     : "no";
+}
+
+/** What was not committed, and where the files are when they were kept. */
+export function leftOutNote(items: LeftOut[], keptIn: string | null): string {
+  const generated = items.filter((i) => i.why === "generated").map((i) => i.path);
+  const large = items.filter((i) => i.why === "large_binary");
+  const lines: string[] = [];
+  if (generated.length) {
+    lines.push(
+      `I left out ${list(generated)}: they look like installed or built files rather than your own work, and your project doesn't ignore them. Ignore or add them yourself if that's wrong.`,
+    );
+  }
+  if (large.length) {
+    const names = large.map((i) => `${i.path} (${Math.round((i.bytes ?? 0) / 1_048_576)} MB)`);
+    const one = large.length === 1;
+    lines.push(
+      `I left out the very large file${one ? "" : "s"} ${list(names)}, so ${one ? "it isn't" : "they aren't"} in the merge.${keptIn ? ` ${one ? "It is" : "They are"} still in ${keptIn}.` : ""}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function list(items: string[]): string {
+  const shown = items.slice(0, 5).join(", ");
+  return items.length > 5 ? `${shown} and ${items.length - 5} more` : shown;
 }
 
 export function nothingToLand(base: string): string {
