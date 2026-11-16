@@ -14,6 +14,7 @@ import { decide, nativeAction } from "../policy/approvals.js";
 import type { Approval } from "../policy/escalations.js";
 import { COORDINATOR_GUIDANCE } from "../prompts/coordinator.js";
 import { GRILLING_GUIDANCE } from "../prompts/grilling.js";
+import { TEACHING_GUIDANCE } from "../prompts/teaching.js";
 import type { Questions } from "../questions/questions.js";
 import { COORDINATOR_OWNER, type QuotaMonitor } from "../quota/monitor.js";
 import type { Bucket } from "../quota/store.js";
@@ -61,6 +62,11 @@ export interface CoordinatorDeps {
   /** A Goal event invocation finished; the engine applies its fallback if nothing was decided. */
   goalEventHandled(event: GoalEvent): void;
   models: ModelCatalog;
+  /**
+   * Stable context appended to the system prompt on every invocation (standing orders, what is
+   * known about the user). Unchanged text keeps prompt caching effective.
+   */
+  contextBlocks?(): string[];
   /** An escalated approval and the Brief authority it is judged against. */
   approval(id: string): { approval: Approval; authority: string } | undefined;
 }
@@ -222,7 +228,14 @@ export class Coordinator {
         workdir: this.deps.workdir,
         prompt,
         resumeSessionId,
-        appendSystemPrompt: `${COORDINATOR_GUIDANCE}\n\n${GRILLING_GUIDANCE}`,
+        appendSystemPrompt: [
+          COORDINATOR_GUIDANCE,
+          GRILLING_GUIDANCE,
+          TEACHING_GUIDANCE,
+          ...(this.deps.contextBlocks?.() ?? []),
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
         model,
         effort,
         mcp: this.deps.mcpLaunch(token),

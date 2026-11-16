@@ -133,6 +133,30 @@ export const configSchema = z.strictObject({
       complete: z.boolean().default(false),
     })
     .prefault({}),
+  standing: z
+    .strictObject({
+      /** Roughly how many tokens of standing orders go into one Worker's guidance (4 chars each). */
+      tokenBudget: z.number().int().min(0).max(5_000).default(600),
+    })
+    .prefault({}),
+  schedules: z
+    .strictObject({
+      /** The longest the scheduler sleeps before looking at the clock again (also detects wake). */
+      tickMs: z.number().int().min(1_000).default(60_000),
+      /** A missed run is still caught up (once) if it was due no longer ago than this. */
+      catchUpWindowMs: z
+        .number()
+        .int()
+        .positive()
+        .default(24 * 3_600_000),
+    })
+    .prefault({}),
+  memory: z
+    .strictObject({
+      /** The most characters of "what you know about the user" shown to the Coordinator. */
+      contextChars: z.number().int().min(0).max(20_000).default(2_000),
+    })
+    .prefault({}),
   /** Per-Channel settings (pairing, credentials), keyed by Channel kind. */
   channels: z.record(z.string(), z.unknown()).default({}),
 });

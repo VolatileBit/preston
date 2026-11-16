@@ -38,6 +38,20 @@ _Avoid_: Supervisor, orchestrator loop, manager
 Getting a Verified Goal's work into the Project's main branch: a pull request merged on GitHub when the repository has one, otherwise a local merge. Work that could not be checked is not landed.
 _Avoid_: Deploying (publishing is a separate, asked-about step)
 
+### Teaching
+
+**Standing order**:
+A persistent rule about how Preston works, in the user's words, that applies wherever its scope matches. It governs behaviour and never starts work by itself.
+_Avoid_: Policy, rule, preference
+
+**Schedule**:
+A durable instruction to start a Goal, or run a plain check, at a time or on a repeat. Each run that starts a Goal creates a new Goal; the Schedule itself never finishes like a Goal does.
+_Avoid_: Cron job, recurring goal, reminder
+
+**Memory**:
+A lasting fact or preference the user told Preston, kept across Goals. It is not progress on any work.
+_Avoid_: Notes, context, knowledge base
+
 ### Communication
 
 **Channel**:
