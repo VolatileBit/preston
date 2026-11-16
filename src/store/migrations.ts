@@ -209,5 +209,67 @@ export const MIGRATIONS: readonly string[] = [
     UNIQUE (channel, ref)
   );
   CREATE INDEX inbound_by_state ON inbound_messages(state);
+  `,  // 4: Standing orders (versioned), schedules with their run keys, and the memory search index
+  //    (the Markdown files are the source of truth; the FTS table is created in code when the
+  //    SQLite build supports FTS5).
+  `
+  CREATE TABLE standing_order_versions (
+    order_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    origin TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    definition TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (order_id, version)
+  );
+
+  CREATE TABLE schedules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    job TEXT NOT NULL,
+    project_path TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    next_run TEXT,
+    overlap TEXT NOT NULL,
+    missed_run TEXT NOT NULL,
+    delivery TEXT NOT NULL,
+    origin_channel TEXT,
+    origin_conversation TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE schedule_runs (
+    id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    scheduled_for TEXT NOT NULL,
+    source TEXT NOT NULL,
+    state TEXT NOT NULL,
+    reason TEXT,
+    goal_id TEXT REFERENCES goals(id),
+    outcome TEXT,
+    missed_count INTEGER NOT NULL DEFAULT 0,
+    standing_order_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (schedule_id, scheduled_for)
+  );
+  CREATE INDEX schedule_runs_by_state ON schedule_runs(state);
+  CREATE INDEX schedule_runs_by_goal ON schedule_runs(goal_id);
+
+  CREATE TABLE memory_docs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    text TEXT NOT NULL,
+    meta TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL,
+    UNIQUE (kind, ref)
+  );
+  CREATE INDEX memory_docs_by_scope ON memory_docs(kind, scope);
   `,
 ];
