@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -11,6 +11,7 @@ import { IpcClient } from "../ipc/client.js";
 import { RPC_ERRORS, RpcCallError } from "../ipc/protocol.js";
 import { type IpcMethod, type IpcServer, startIpcServer } from "../ipc/server.js";
 import { errorMessage } from "../log.js";
+import { createHostNotifier } from "../notify/index.js";
 import { createRuntime, type Runtime, type RuntimeOptions } from "../runtime.js";
 import { newSecret } from "../util/ids.js";
 import { PRESTON_VERSION } from "../version.js";
@@ -38,9 +39,11 @@ export interface Daemon {
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const paths = homePaths(resolve(options.home));
   ensureHome(paths);
+  // A live owner that does not answer yet may still be starting (for example when the login
+  // service and `preston` start the daemon at the same moment), so a fresh lock is respected.
   const lock = await acquireLock(
     paths.lock,
-    async (pid) => processAlive(pid) && (await answers(paths)),
+    async (pid) => processAlive(pid) && (lockIsFresh(paths.lock) || (await answers(paths))),
   );
   const terminal = new TerminalChannel();
   let runtime: Runtime | undefined;
@@ -96,7 +99,13 @@ export async function runDaemonProcess(env: NodeJS.ProcessEnv = process.env): Pr
     void daemon.close().finally(() => process.exit(0));
   };
   try {
-    daemon = await startDaemon({ home: resolveHome(env), adapters, onShutdownRequest: exit });
+    const notifier = createHostNotifier();
+    daemon = await startDaemon({
+      home: resolveHome(env),
+      adapters,
+      onShutdownRequest: exit,
+      notifyHost: (text) => notifier.notify(text),
+    });
   } catch (err) {
     if (err instanceof AlreadyRunningError) {
       process.stderr.write(`${err.message}\n`);
@@ -211,6 +220,17 @@ function ensureIpcToken(path: string): string {
   writeFileSync(path, token, { mode: 0o600 });
   chmodSync(path, 0o600);
   return token;
+}
+
+/** How long a daemon may take from taking the lock to answering on its endpoint. */
+const STARTUP_GRACE_MS = 20_000;
+
+function lockIsFresh(path: string): boolean {
+  try {
+    return Date.now() - statSync(path).mtimeMs < STARTUP_GRACE_MS;
+  } catch {
+    return false;
+  }
 }
 
 /** Whether a daemon already answers on this home's endpoint. */

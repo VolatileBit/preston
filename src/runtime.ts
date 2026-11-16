@@ -35,6 +35,8 @@ export interface RuntimeOptions {
   initialConfig?: ConfigPatch;
   /** Mirror log lines to stderr. */
   logToStderr?: boolean;
+  /** Desktop notifications for Channels (`ChannelContext.notifyHost`). Defaults to logging only. */
+  notifyHost?: (text: string) => unknown;
 }
 
 /** A running Preston: everything the daemon owns, without the IPC endpoint. */
@@ -89,7 +91,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     env: { PRESTON_HOME: paths.root },
   });
 
-  const hub = new ChannelHub(log.child("channels"), clock);
+  const hub = new ChannelHub(log.child("channels"), clock, options.notifyHost);
   const channels =
     typeof options.channels === "function"
       ? options.channels({ config: config.get(), log: log.child("channels") })

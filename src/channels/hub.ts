@@ -15,6 +15,8 @@ export class ChannelHub {
   constructor(
     private readonly log: Logger,
     private readonly clock: Clock,
+    /** Shows a desktop notification on the host; omitted in tests, where it is only logged. */
+    private readonly notifyHost?: (text: string) => unknown,
   ) {}
 
   register(channel: Channel): void {
@@ -60,7 +62,14 @@ export class ChannelHub {
           await channel.start({
             onMessage: (message) => this.receive(channel.kind, message),
             setStatus: (status, detail) => this.setStatus(channel.kind, status, detail),
-            notifyHost: (text) => log.warn("host notification requested", { text }),
+            notifyHost: (text) => {
+              log.warn("host notification requested", { text });
+              try {
+                this.notifyHost?.(text);
+              } catch (err) {
+                log.warn("host notification failed", { error: err });
+              }
+            },
             log: (level, message, data) => log[level](message, data),
           });
         } catch (err) {

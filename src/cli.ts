@@ -2,6 +2,8 @@
 import { fileURLToPath } from "node:url";
 import { homePaths, resolveHome } from "./home.js";
 
+quietSqliteWarning();
+
 /**
  * `preston` is the only user-facing command; it opens the terminal conversation.
  * `daemon` and `mcp` are internal roles of the same executable. Modules are loaded per role so
@@ -20,6 +22,12 @@ async function main(argv: string[]): Promise<number | undefined> {
       await runDaemonProcess();
       return undefined;
     }
+    case "--version": {
+      // Hidden, for diagnostics and the packaging smoke test.
+      const { PRESTON_VERSION } = await import("./version.js");
+      process.stdout.write(`${PRESTON_VERSION}\n`);
+      return 0;
+    }
     case "mcp": {
       const index = rest.indexOf("--token");
       const token = index >= 0 ? rest[index + 1] : undefined;
@@ -37,6 +45,22 @@ async function main(argv: string[]): Promise<number | undefined> {
       );
       return 2;
   }
+}
+
+/**
+ * Node 22 warns that `node:sqlite` is experimental on first use. That is noise for users, so
+ * this one warning is dropped before Node sees it; every other warning, and Node's own warning
+ * flags, behave as usual.
+ */
+function quietSqliteWarning(): void {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = function (this: NodeJS.Process, warning: string | Error, ...rest: never[]) {
+    const options = rest[0] as string | { type?: string } | undefined;
+    const type = typeof options === "string" ? options : (options?.type ?? (warning as Error).name);
+    const message = typeof warning === "string" ? warning : warning.message;
+    if (type === "ExperimentalWarning" && /\bSQLite\b/.test(message)) return;
+    return emitWarning.call(process, warning, ...rest);
+  } as typeof process.emitWarning;
 }
 
 main(process.argv.slice(2)).then(

@@ -1,7 +1,7 @@
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { connectToDaemon } from "../daemon/ensure.js";
-import { ensureStartAtLogin } from "../daemon/start-at-login.js";
+import { ensureStartAtLogin, type StartAtLoginResult } from "../daemon/start-at-login.js";
 import type { HomePaths } from "../home.js";
 import type { IpcClient } from "../ipc/client.js";
 import { errorMessage } from "../log.js";
@@ -13,6 +13,8 @@ export interface TerminalOptions {
   cliPath: string;
   input?: Readable;
   output?: Writable & { isTTY?: boolean };
+  /** Registers the daemon to start at login. Tests replace it so nothing is registered. */
+  startAtLogin?: (options: { paths: HomePaths; cliPath: string }) => Promise<StartAtLoginResult>;
 }
 
 const INSTALL_HELP = [
@@ -40,6 +42,10 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     if (interactive) rl.prompt(true);
   };
 
+  // Register first, so a re-registration that restarts the service happens before connecting.
+  const login = await (options.startAtLogin ?? ensureStartAtLogin)(options);
+  if (login.notice) print(login.notice);
+
   let client: IpcClient;
   try {
     client = await connectToDaemon(options.paths, options.cliPath);
@@ -48,7 +54,6 @@ export async function runTerminal(options: TerminalOptions): Promise<number> {
     rl.close();
     return 1;
   }
-  await ensureStartAtLogin();
 
   const state = await client.request<SetupState>("setup.state");
   let justChoseAgents = false;

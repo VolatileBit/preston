@@ -24,7 +24,13 @@ test("first run: choose the agent, hand setup to the Coordinator, chat, and leav
   const output = new PassThrough();
   let screen = "";
   output.on("data", (chunk) => (screen += chunk));
-  const exit = runTerminal({ paths: daemon.paths, cliPath: inject("cliPath"), input, output });
+  const exit = runTerminal({
+    paths: daemon.paths,
+    cliPath: inject("cliPath"),
+    input,
+    output,
+    startAtLogin: async () => ({ registered: true, changed: false }),
+  });
 
   await waitFor(() => screen.includes("Shall I use Fake agent? [Y/n]"), {
     what: "the agent question",
