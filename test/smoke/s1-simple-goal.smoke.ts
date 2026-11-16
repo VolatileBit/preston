@@ -21,7 +21,32 @@ import { git, makeProject, poll, remoteRefs, startWorld } from "./support/world.
 smokeScenario("s1-simple-goal", ["claude", "codex"], async ({ provider, startedAt }) => {
   const project = makeProject({ remote: true });
   const originBefore = remoteRefs(project.origin as string);
-  const world = await startWorld({ scenario: "s1-simple-goal", provider, coordinator: "real" });
+  const world = await startWorld({
+    scenario: "s1-simple-goal",
+    provider,
+    coordinator: "real",
+    chooseAgents: true,
+  });
+  const rt = world.daemon.runtime;
+
+  // Setup, as `preston` does it: detect the installed agents for real, choose one, then the
+  // Coordinator and Worker are set to the cheapest model (what the owner would say in chat).
+  const before = await rt.setup.state();
+  expect(before.needsAgents).toBe(true);
+  const detected = before.agents.find((a) => a.agent === provider);
+  expect(detected, `${provider} was not detected`).toMatchObject({ installed: true });
+  expect(detected?.version).toMatch(/\d+\.\d+/);
+  await rt.setup.chooseAgents({ agents: [provider], balanceByQuota: false });
+  rt.config.update(
+    {
+      coordinator: world.cheapest,
+      workers: world.cheapest,
+      setup: { complete: true },
+    },
+    "smoke test: cheapest models",
+  );
+  expect((await rt.setup.state()).needsAgents).toBe(false);
+  expect(rt.config.get().coordinator.agent).toBe(provider);
 
   world.say(
     `I'm in a hurry, please don't ask me any questions, just draft the Brief and start. ` +
@@ -32,7 +57,6 @@ smokeScenario("s1-simple-goal", ["claude", "codex"], async ({ provider, startedA
   const goal = await world.waitForGoal();
   console.log(describeTurns(world));
   console.log(`Goal ended: ${goal.state}/${goal.outcome} ${goal.detail ?? ""}`);
-  const rt = world.daemon.runtime;
   expectVerified(rt, goal);
 
   // The Coordinator skipped grilling: it drafted a Brief with a real check and started at once.

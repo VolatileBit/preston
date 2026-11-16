@@ -15,7 +15,7 @@ import { makeProject, poll, tempDir } from "./support/world.js";
  * the same native Session, finish the Goal without redoing finished work, and leave no agent
  * processes behind.
  */
-smokeScenario("s3-restart-mid-run", ["claude"], async ({ provider, startedAt }) => {
+smokeScenario("s3-restart-mid-run", ["claude", "codex"], async ({ provider, startedAt }) => {
   const project = makeProject();
   const home = tempDir("home");
   const { model, effort } = CHEAPEST[provider];
@@ -147,7 +147,10 @@ smokeScenario("s3-restart-mid-run", ["claude"], async ({ provider, startedAt }) 
         .join("\n");
       const rewrites = turn2
         .split("\n")
-        .filter((line) => /"name":"(Write|Edit)"/.test(line) && line.includes("part1.txt"));
+        .filter(
+          (line) =>
+            /"name":"(Write|Edit)"|"type":"fileChange"/.test(line) && line.includes("part1.txt"),
+        );
       console.log(
         `writes of part1.txt after the restart: ${rewrites.length}; mtime before kill ${mtimeBefore}`,
       );

@@ -120,10 +120,17 @@ export interface WorldOptions {
   metering?: Omit<MeteredOptions, "scenario" | "provider">;
   /** An existing home, for a restart. */
   home?: string;
+  /**
+   * Start as a fresh install (no agent chosen, setup incomplete), so the scenario can go through
+   * the real setup steps (detection, choosing the agent) itself.
+   */
+  chooseAgents?: boolean;
 }
 
 export interface World {
   home: string;
+  /** The model and effort the scenarios configure for the provider. */
+  cheapest: { model: string; effort: string };
   startedAt: number;
   daemon: Daemon;
   channels: LoggedChannel[];
@@ -175,15 +182,18 @@ export async function startWorld(options: WorldOptions): Promise<World> {
     channels,
     mcpCommand: { command: process.execPath, args: [cli] },
     landing: { github: noGitHub },
-    initialConfig: {
-      agents: { enabled: [options.provider] },
-      coordinator: { agent: scripted ? "fake" : options.provider, model, effort },
-      workers: { model, effort },
-      verification: { checkTimeoutMs: 120_000 },
-      setup: { complete: true },
-      ...BASE_TIMING,
-      ...options.config,
-    },
+    initialConfig: options.chooseAgents
+      ? // A fresh install: no agent chosen yet. The caller goes through the real setup steps.
+        { verification: { checkTimeoutMs: 120_000 }, ...BASE_TIMING, ...options.config }
+      : {
+          agents: { enabled: [options.provider] },
+          coordinator: { agent: scripted ? "fake" : options.provider, model, effort },
+          workers: { model, effort },
+          verification: { checkTimeoutMs: 120_000 },
+          setup: { complete: true },
+          ...BASE_TIMING,
+          ...options.config,
+        },
   });
   const stop = async () => {
     await daemon.close();
@@ -192,6 +202,7 @@ export async function startWorld(options: WorldOptions): Promise<World> {
   const rt = daemon.runtime;
   return {
     home,
+    cheapest: { model, effort },
     startedAt,
     daemon,
     channels,

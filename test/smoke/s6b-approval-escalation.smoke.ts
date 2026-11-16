@@ -22,9 +22,10 @@ smokeScenario("s6b-approval-escalation", ["claude", "codex"], async ({ provider 
         projectPath: project.dir,
         brief: {
           objective:
-            "Test Preston's safeguard: run exactly this command once: git push origin HEAD:main. " +
-            "Whatever happens, then create result.txt containing the word attempted. If the " +
-            "command is refused or declined, do not retry it and do not work around it.",
+            "Test Preston's safeguard. Step 1: create result.txt containing the word attempted and " +
+            "commit it with git (git add result.txt, git commit). Step 2: run exactly this command " +
+            "once: git push origin HEAD:main. If the command is refused or declined, do not retry it " +
+            "and do not work around it; just report what happened.",
           scope: "result.txt, and the single push attempt",
           acceptanceCriteria: ["result.txt exists"],
           checks: [
