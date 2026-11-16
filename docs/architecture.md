@@ -41,10 +41,10 @@ Registration never fails `preston`: an error becomes one plain notice ("Preston 
 - `preston.db`: SQLite via `node:sqlite`, with no native dependency. It holds Goals, Briefs, Runs, Sessions, events, questions, escalated approvals, quota state, the outbox, and config versions. Migrations are forward-only and numbered.
 - `logs/` and `transcripts/`: `logs/preston.log` is structured JSON lines with secrets masked, and `logs/daemon.out` is the daemon's stdout and stderr; `transcripts/<runId>/` holds agent transcripts and check output, referenced from the database by path.
 - `coordinator/`: the working directory of the Coordinator's agent Session.
-- `worktrees/`: one git worktree per coding Goal.
+- `worktrees/<project-slug>/<goal-id>`: one git worktree per coding Goal (see Projects, worktrees and landing).
 - `service.json`: what the login service registration last recorded; `service/` holds the Windows launcher and task XML.
 
-Nothing Preston owns is ever written inside a Project.
+Nothing Preston owns is ever written inside a Project. The one unavoidable exception is Git's own bookkeeping: a worktree and its `preston/<goal-id>-<slug>` branch are recorded in the repository's `.git`, and removed again when the work lands.
 
 ## Runtime components (inside the daemon)
 
@@ -100,6 +100,28 @@ States: `queued → running → verifying → completed`. Side states are `waiti
 - On startup, every non-terminal Goal is reconciled against reality before anything resumes: orphaned agent processes are terminated, running Runs are recovered, verification is re-run, pending Coordinator questions, approvals and decisions are raised again, quota monitors resume from their persisted schedule, and unhandled inbox messages are replayed.
 - Every Goal records the tactics tried on it (`attempts`: stall resume, strategy events and decisions, agent handovers), so Preston changes strategy instead of repeating one.
 - An approval the policy escalates becomes an `approvals` row linked to a Worker question, and a Coordinator event. The Coordinator decides it with `approval_decide` within the Brief's authority, or asks the user with `ask_human`; once the question is with the user, only an owner message can decide it. The Worker's native request (Claude's permission tool call, Codex's approval request) waits up to `approvals.escalationWaitMs` (2 minutes). A decision in time is the native answer. Otherwise the request is declined with a note that it was escalated; the Worker carries on and ends its turn, the Run parks as `waiting_for_user`, and the later decision resumes the same Session through the parked-question path. Undecided approvals are raised again after a restart.
+
+## Projects, worktrees and landing
+
+All of this lives in `src/landing`. The Goal engine sees it only through `LandingHooks` (`src/landing/hooks.ts`): `prepare` before every turn, `land` after verification, and a few queries used by recovery. Git is always run as `git` with an argument array in an explicit working folder (never a shell string), with `GIT_DIR`-style variables removed, so it behaves the same on Windows, macOS and Linux. GitHub is reached through the `GitHubClient` interface; the real one drives `gh`, and tests inject a fake backed by a real bare repository.
+
+**Projects.** A Project is a folder identified by its canonical path (symlinks resolved, Windows case normalised), created by `goal_create` and listed by `project_list`. Each Goal start re-inspects it read-only (`src/landing/project.ts`): is it a repository (and is the folder a subfolder of one), bare, without commits, on a detached HEAD, does it use submodules, what is the main branch (the remote's default, `init.defaultBranch`, then `main`, `master`, `trunk`, `develop`, the checked-out branch), which remote, and does it have uncommitted edits.
+
+**Isolation.** A Goal in a repository works in `<home>/worktrees/<project-slug>/<goal-id>` on branch `preston/<goal-id>-<slug>`, created at the tip of the main branch (or of the checked-out branch when the Brief says `workspace.startFrom: "current"`). `prepare` is idempotent and records the worktree in `goal_workspaces`, so after a restart the same folder is reused, and a folder that went missing is re-attached to its branch. The user's own checkout, branch and uncommitted edits are never touched. A non-repository folder works in place. When a worktree cannot be made (no commits, no usable base branch, submodules that will not initialise, Windows path length, a git error) the Goal is Blocked with a plain explanation, unless the Brief sets `workspace.allowInPlace`, in which case the Worker works in the folder and the outcome says so. A bare repository is always Blocked. Worktree creation is serialised per repository.
+
+**Landing.** After the Brief's checks pass (Verified), the engine calls `land`. It is a sequence of steps that each look at what exists before acting and are recorded in `landings` / `landing_ops`, so a crash resumes instead of repeating:
+
+1. Commit whatever the Worker left uncommitted on the Goal's branch (message from the Brief, no trailers; a failing commit hook goes back to the Worker).
+2. Choose the mode, once: a pull request when the project has a remote, `gh` is installed and signed in, and the Goal's base commit is already on the remote's branch; otherwise a local merge, with one plain sentence saying why nothing was pushed.
+3. Merge the latest main branch into the Goal's branch inside its own worktree. A conflict is aborted cleanly and the Worker is resumed once (`landing.conflictFixAttempts`) with the files and the commit to merge; if it is still unresolved the Goal is Blocked. If the merge changed anything, the Brief's checks are re-run there, so the work is Verified against the merged result; a failure also goes back to the Worker once.
+4. If the merge would publish something and `landing.autoMergePublishing` is off, ask the user (see below) and park the Goal in `waiting_for_user`.
+5. Local: create the merge (or squash) commit from the verified tree with `git commit-tree`, then move the main branch to it. If a checkout has the branch checked out it is fast-forwarded with `git merge --ff-only` (Git itself refuses if that would overwrite the user's edits, which Blocks the Goal and changes nothing); otherwise only the branch ref is moved with a compare-and-swap `update-ref`. The user's current branch and uncommitted edits are untouched, and the outcome says so in one sentence. If main moved meanwhile the work is combined and checked again (up to three passes).
+6. Pull request: push the branch (a fast-forward, never forced), look for an existing PR for the branch before creating one, poll `gh pr checks --required` with the injected clock (no model calls) for up to `landing.requireCiWaitMs` (failing checks go to the Worker once), confirm main did not move, and merge with the configured method (`merge`, or the first method the repository allows). It then fast-forwards the user's local main only when that is safe.
+7. Remove the worktree and the local branch. Unverified work is never merged: it stays on its branch and the outcome names it.
+
+**Merges that publish.** `src/landing/publishing.ts` reads repository files only as data and decides deterministically: platform files (`vercel.json`, `netlify.toml`, `render.yaml`, Fly, Heroku, Cloudflare, fastlane, release tooling), a `gh-pages` branch, and GitHub workflows that run on a push to the branch being merged into (tag-only, other-branch, pull-request-only, manual and release-triggered workflows do not count) and publish or deploy. Anything found, certain or not, gets one plain question with a recommendation through the ordinary `ask_human` path (`Questions.askHuman`); the Coordinator records the reply as `yes` or `no` with `answer_worker`, and anything unclear means no. "No" leaves the verified work on its branch (and its PR open). `landing.autoMergePublishing` lifts the question.
+
+Landing settings are in `config.landing`: `mergeMethod`, `autoMergePublishing`, `requireCiWaitMs`, `ciPollIntervalMs`, `ciStartGraceMs`, `conflictFixAttempts`; the Coordinator changes them with `config_update`. Preston's own pushes and merges are Preston's decisions, not the Worker's, so the default Brief authority ("do not push") does not stop a pull request.
 
 ## Supervision, quota and recovery
 

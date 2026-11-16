@@ -37,6 +37,10 @@ After that, `preston` opens a conversation with Preston. Tell it what you want d
 
 You can always type `status`, `stop`, `pause` or `resume`. Preston answers these straight away, even when its own agent has run out of quota. If Preston loses a chat connection, such as its WeChat login, it shows a notification on your computer.
 
+## What happens to the finished work
+
+In a Git project, Preston gives each Goal its own separate working copy, so your own checkout, branch and unsaved edits are never touched and several Goals can run side by side. When the work is Verified it merges it for you: through a pull request on GitHub if the project has one and the GitHub tool (`gh`) is signed in (it waits for the project's required checks first), otherwise straight into your main branch on your computer. If your main branch is checked out and clean, it is brought up to date; if you are on another branch, Preston leaves you there and says so. If a merge would also publish something (deploy a site, release a build, publish a package), Preston asks you first; you can change that in chat. Work it could not check is left on its own branch, not merged. Folders that are not Git projects are worked on in place.
+
 ## Where Preston keeps things
 
 All of Preston's state, config and logs live in `~/.preston` (or `$PRESTON_HOME`), never inside your projects. Its config file is readable only by you, and tokens are masked in its logs, which are in `~/.preston/logs`.

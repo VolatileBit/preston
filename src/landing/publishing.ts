@@ -105,7 +105,7 @@ const PUBLISH_WORDS: PublishWords[] = [
   },
   {
     match:
-      /\b(vercel|netlify|flyctl|wrangler|firebase|heroku|serverless|surge)\b[^\n]*\b(deploy|publish|--prod)\b|\bfly\s+deploy\b|amondnet\/vercel-action|nwtgck\/actions-netlify/i,
+      /\b(vercel|netlify|flyctl|wrangler|firebase|heroku|serverless|surge)\b[^\n]*(?:\bdeploy\b|\bpublish\b|--prod\b)|\bfly\s+deploy\b|amondnet\/vercel-action|nwtgck\/actions-netlify/i,
     what: "deploys the site or app",
   },
   {

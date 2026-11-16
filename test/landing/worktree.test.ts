@@ -204,6 +204,30 @@ describe("a Goal in a Git project works in its own worktree", () => {
   });
 });
 
+describe("work that could not be checked", () => {
+  test("is not merged: it stays on its branch and the outcome says where", async () => {
+    const repo = initRepo();
+    const p = await startPreston({
+      scenario: {
+        coordinator: goalCreatingCoordinator(repo, brief({ checks: [] })),
+        worker: writingWorker(),
+      },
+    });
+
+    p.owner.receive("go");
+    const goal = await waitFor(finishedGoal(p.rt), { what: "goal to finish" });
+
+    expect(goal).toMatchObject({ state: "completed", outcome: "unverified" });
+    expect(git(repo, "log", "-1", "--format=%s", "main")).toBe("Initial commit");
+    const [outcome] = p.owner.texts("outcome");
+    expect(outcome).toContain("Done, but unverified");
+    expect(outcome).toContain("I haven't merged it");
+    const branch = branches(repo).find((b) => b.startsWith("preston/")) as string;
+    expect(outcome).toContain(branch);
+    expect(worktreesIn(p.home)).toHaveLength(1);
+  });
+});
+
 describe("Projects that are not ordinary repositories", () => {
   test("a folder that is not a repository works in place", async () => {
     const folder = tempDir("homeserver");

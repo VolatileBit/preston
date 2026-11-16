@@ -453,6 +453,32 @@ describe("a hosted repository: pull request, checks, merge", () => {
     expect(github.count("mergePr")).toBe(0);
   });
 
+  test("stopping a Goal that is waiting for checks ends the wait and merges nothing", async () => {
+    const repo = initRepo();
+    const origin = addRemote(repo);
+    const github = new FakeGitHub(origin);
+    github.checks_ = () => ({ state: "pending", failing: [] });
+    const p = await startPreston({
+      config: config(),
+      landing: { github },
+      scenario: {
+        coordinator: goalCreatingCoordinator(repo, brief()),
+        worker: writingWorker(),
+      },
+    });
+    p.owner.receive("go");
+    await waitFor(() => github.count("checks") >= 2, { what: "landing to wait for the checks" });
+
+    p.owner.receive("stop");
+    await waitFor(() => p.rt.goals()[0]?.state === "cancelled", { what: "goal to stop" });
+    const seen = github.count("checks");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(github.count("checks")).toBeLessThanOrEqual(seen + 1);
+    expect(github.count("mergePr")).toBe(0);
+    expect(git(origin, "log", "-1", "--format=%s", "main")).toBe("Initial commit");
+  });
+
   test("uses squash when the repository allows only that", async () => {
     const repo = initRepo();
     const origin = addRemote(repo);

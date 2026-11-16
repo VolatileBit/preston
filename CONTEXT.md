@@ -34,6 +34,10 @@ _Avoid_: Thread, conversation (for the agent side)
 Preston's own reasoning step, invoked only when a decision adds value, never to relay routine messages to a Worker.
 _Avoid_: Supervisor, orchestrator loop, manager
 
+**Landing**:
+Getting a Verified Goal's work into the Project's main branch: a pull request merged on GitHub when the repository has one, otherwise a local merge. Work that could not be checked is not landed.
+_Avoid_: Deploying (publishing is a separate, asked-about step)
+
 ### Communication
 
 **Channel**:
