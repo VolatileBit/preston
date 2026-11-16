@@ -279,5 +279,7 @@ export const MIGRATIONS: readonly string[] = [
   // 6: What landing left out of a commit (generated folders, large binary files).
   `
   ALTER TABLE landings ADD COLUMN left_out TEXT;
+  -- Which agent a new Goal went to, and why (JSON).
+  ALTER TABLE goals ADD COLUMN agent_choice TEXT;
   `,
 ];

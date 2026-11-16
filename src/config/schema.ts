@@ -85,6 +85,8 @@ export const configSchema = z.strictObject({
       notifyAfterMs: ms(30 * MINUTE),
       /** A Goal moves to another agent with headroom only when its wait is longer than this. */
       switchAfterMs: ms(60 * MINUTE),
+      /** An agent whose metered quota is used up beyond this share has no headroom for new work. */
+      headroomPercent: z.number().min(1).max(100).default(90),
     })
     .prefault({}),
   supervision: z

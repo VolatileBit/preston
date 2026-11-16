@@ -49,7 +49,8 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
       brief: briefSchema,
       parentGoalId: goalId.optional().describe("Set for a follow-up to a finished Goal"),
     }),
-    handler: ({ projectPath, brief, parentGoalId }) => {
+    handler: async ({ projectPath, brief, parentGoalId }) => {
+      const agent = await engine.chooseAgent(projectPath);
       const invocation = coordinator.current();
       const replyTo = invocation?.replyTo;
       const input = invocation?.input;
@@ -57,6 +58,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
         projectPath,
         brief,
         parentGoalId,
+        agent,
         origin: replyTo
           ? { channel: replyTo.channel, conversationId: replyTo.conversationId }
           : undefined,
@@ -66,7 +68,7 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
             ? `message:${input.inboundId}`
             : undefined,
       });
-      return { goalId: goal.id, state: goal.state };
+      return { goalId: goal.id, state: goal.state, agent: agent.agent };
     },
   });
 
@@ -423,6 +425,8 @@ function summary(goal: Goal) {
     description: describeGoalState(goal),
     detail: goal.detail,
     parentGoalId: goal.parentGoalId,
+    /** The agent the Goal started on and why Preston chose it. */
+    agentChoice: goal.agentChoice,
     createdAt: goal.createdAt,
     endedAt: goal.endedAt,
   };

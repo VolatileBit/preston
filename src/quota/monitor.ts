@@ -17,9 +17,6 @@ export { QuotaStore };
 export type QuotaOwner = string;
 export const COORDINATOR_OWNER: QuotaOwner = "coordinator";
 
-/** Agents above this share of a metered window are not treated as having headroom. */
-const HEADROOM_MAX_USED_PERCENT = 90;
-
 export function authBucket(agent: AgentKind): string {
   return `auth:${agent}`;
 }
@@ -38,6 +35,12 @@ export interface QuotaDeps {
   resumeCoordinator(probe: boolean): boolean;
   /** A check found the bucket still blocked: Goals may be told or handed to another agent. */
   stillBlocked(bucket: Bucket): void;
+}
+
+/** Whether an agent can take new work, and when it is expected back if not and known. */
+export interface Headroom {
+  ok: boolean;
+  resetsAt?: number | undefined;
 }
 
 type Observation = { result: "available" | "blocked" | "unknown"; resetsAt?: string | undefined };
@@ -157,18 +160,35 @@ export class QuotaMonitor {
 
   /** Whether an agent can take on work now: nothing blocks it and its quota read has room. */
   async headroom(agent: AgentKind): Promise<boolean> {
+    return (await this.headroomInfo(agent)).ok;
+  }
+
+  /**
+   * Headroom, and when the agent is expected to have quota again (milliseconds) if it has none
+   * and that is known. "Room" means below `quota.headroomPercent` of every metered window.
+   */
+  async headroomInfo(agent: AgentKind): Promise<Headroom> {
+    const known = this.headroomKnown(agent);
     const adapter = this.deps.adapter(agent);
-    if (!adapter || this.activeBlock(agent)) return false;
-    if (!adapter.readQuota) return true;
+    if (!known.ok || !adapter?.readQuota) return known;
     try {
-      const readings = await adapter.readQuota();
-      return readings.every(
-        (r) => r.available !== false && (r.usedPercent ?? 0) < HEADROOM_MAX_USED_PERCENT,
+      const { headroomPercent } = this.deps.settings();
+      const full = (await adapter.readQuota()).filter(
+        (r) => r.available === false || (r.usedPercent ?? 0) >= headroomPercent,
       );
+      const resets = full.flatMap((r) => parseTime(r.resetsAt) ?? []);
+      return { ok: full.length === 0, resetsAt: resets.length ? Math.min(...resets) : undefined };
     } catch (err) {
       this.deps.log.warn("quota read failed", { agent, error: errorMessage(err) });
-      return false;
+      return { ok: false };
     }
+  }
+
+  /** Headroom as far as Preston already knows (blocks and logins), without reading quota. */
+  headroomKnown(agent: AgentKind): Headroom {
+    if (!this.deps.adapter(agent)) return { ok: false };
+    const block = this.activeBlock(agent);
+    return block ? { ok: false, resetsAt: parseTime(block.resetsAt) } : { ok: true };
   }
 
   list(): (Bucket & { monitored: boolean })[] {
@@ -433,4 +453,9 @@ export class QuotaMonitor {
 
 function isBlocked(state: BucketState): boolean {
   return BLOCKED_STATES.includes(state);
+}
+
+function parseTime(iso: string | null | undefined): number | undefined {
+  const time = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isFinite(time) ? time : undefined;
 }

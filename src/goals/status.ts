@@ -69,6 +69,8 @@ export function statusText(
   questions: Question[],
   blocks: AgentBlock[] = [],
   now = Date.now(),
+  /** The agent a Goal is on, named when the user has more than one. */
+  agentOf: (goal: Goal) => string | undefined = () => undefined,
 ): string {
   const active = goals.filter((g) => !g.endedAt);
   const finished = goals.filter((g) => g.endedAt).slice(0, 5);
@@ -80,7 +82,10 @@ export function statusText(
     sections.push(
       [
         "In progress:",
-        ...active.map((g) => `- ${g.brief.objective} (${describeGoalState(g)})`),
+        ...active.map((g) => {
+          const agent = agentOf(g);
+          return `- ${g.brief.objective} (${describeGoalState(g)}${agent ? `, on ${agent}` : ""})`;
+        }),
       ].join("\n"),
     );
   }

@@ -350,7 +350,17 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       const bucket = quota.activeBlock(agent);
       if (bucket) blocks.push({ label: agentLabel(agent), bucket });
     }
-    return statusText(store.listGoals({ finishedLimit: 5 }), questions.open(), blocks, clock.now());
+    const several = config.get().agents.enabled.length > 1;
+    return statusText(
+      store.listGoals({ finishedLimit: 5 }),
+      questions.open(),
+      blocks,
+      clock.now(),
+      (goal) => {
+        const agent = store.currentRun(goal.id)?.agent ?? goal.agentChoice?.agent;
+        return several && agent ? agentLabel(agent) : undefined;
+      },
+    );
   };
   const router = new Router({
     outbox,

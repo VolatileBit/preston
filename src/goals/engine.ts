@@ -26,7 +26,7 @@ import {
   WORKER_GUIDANCE,
 } from "../prompts/worker.js";
 import type { Question, Questions } from "../questions/questions.js";
-import type { QuotaMonitor } from "../quota/monitor.js";
+import type { Headroom, QuotaMonitor } from "../quota/monitor.js";
 import type { Bucket } from "../quota/store.js";
 import { formatResetTime } from "../quota/time.js";
 import { type Db, recordEvent, transaction } from "../store/db.js";
@@ -41,6 +41,7 @@ import type {
   WorkerAdapter,
   WorkerEvent,
 } from "../workers/types.js";
+import { type AgentChoice, selectAgent } from "./agents.js";
 import { type Brief, renderBrief } from "./brief.js";
 import { type CheckResult, runCheck } from "./checks.js";
 import {
@@ -163,6 +164,8 @@ export class GoalEngine {
     origin?: Origin | undefined;
     /** Idempotency key: the same key and objective return the Goal already created. */
     sourceKey?: string | undefined;
+    /** The agent to start on (see `chooseAgent`); without it Preston chooses from what it knows. */
+    agent?: AgentChoice | undefined;
     /** Skip the acknowledgement (routine scheduled work says nothing until it has an outcome). */
     quiet?: boolean | undefined;
     /** Called inside the creating transaction, before the first Run starts. */
@@ -182,7 +185,7 @@ export class GoalEngine {
       const existing = this.deps.store.findGoalBySource(input.sourceKey, input.brief.objective);
       if (existing) return existing;
     }
-    const agent = this.pickAgent();
+    const agent = input.agent ?? this.chooseAgentNow(projectPath);
     const { store, db, outbox, clock } = this.deps;
     const goal = transaction(db, () => {
       const projectId = store.ensureProject(projectPath);
@@ -192,8 +195,9 @@ export class GoalEngine {
         parentGoalId: input.parentGoalId,
         origin: input.origin,
         sourceKey: input.sourceKey,
+        agentChoice: agent,
       });
-      recordEvent(db, clock, "goal_created", { goalId: created.id }, { agent });
+      recordEvent(db, clock, "goal_created", { goalId: created.id }, { ...agent });
       input.onCreated?.(created);
       const ack = { kind: "ack" as const, text: ackMessage(created), goalId: created.id };
       if (input.quiet) {
@@ -205,7 +209,7 @@ export class GoalEngine {
       }
       return created;
     });
-    this.startNewRun(goal.id, agent);
+    this.startNewRun(goal.id, agent.agent);
     return this.deps.store.goal(goal.id);
   }
 
@@ -292,7 +296,7 @@ export class GoalEngine {
       landing.resetForReland(goalId, options);
       const run = store.createRun({
         goalId,
-        agent: last?.agent ?? this.pickAgent(),
+        agent: last?.agent ?? this.pickAgentOr(goal),
         workdir: last?.workdir ?? goal.projectPath,
         transcriptDir: (id) => join(this.deps.transcriptsDir, id),
       });
@@ -1389,23 +1393,64 @@ export class GoalEngine {
   }
 
   /**
-   * The agent for a new Goal: the first enabled one, or with balancing allowed, the first one
-   * that is not out of quota.
+   * The agent for a new Goal in a Project, deterministically (see `selectAgent`): with quota
+   * balancing, one with headroom (its own quota read, below `quota.headroomPercent`), the one
+   * used last for the Project when several have it, otherwise the one expected back first. Only
+   * the agents the user enabled are ever considered.
    */
-  private pickAgent(): AgentKind {
-    const { agents } = this.deps.config.get();
-    const usable = agents.enabled.filter((kind) => this.deps.adapter(kind));
-    const first = usable[0];
-    if (!first) {
-      throw new ToolError("No coding agent is set up yet, so Preston cannot start work.");
-    }
-    if (!agents.balanceByQuota) return first;
-    return usable.find((kind) => !this.deps.quota.activeBlock(kind)) ?? first;
+  async chooseAgent(projectPath: string): Promise<AgentChoice> {
+    const path = canonicalPath(projectPath);
+    const usable = this.usableAgents();
+    const balance = this.deps.config.get().agents.balanceByQuota && usable.length > 1;
+    const infos = await Promise.all(
+      usable.map((agent) =>
+        balance ? this.deps.quota.headroomInfo(agent) : this.deps.quota.headroomKnown(agent),
+      ),
+    );
+    return this.selectFrom(usable, infos, path);
   }
 
+  /** The same choice from what Preston already knows, without reading quota (it cannot wait). */
+  private chooseAgentNow(path: string): AgentChoice {
+    const usable = this.usableAgents();
+    return this.selectFrom(
+      usable,
+      usable.map((agent) => this.deps.quota.headroomKnown(agent)),
+      path,
+    );
+  }
+
+  private selectFrom(usable: AgentKind[], infos: Headroom[], path: string): AgentChoice {
+    return selectAgent(
+      usable.map((agent, i) => ({
+        agent,
+        label: agentLabel(agent),
+        headroom: infos[i]?.ok ?? false,
+        resetsAt: infos[i]?.resetsAt,
+      })),
+      {
+        balance: this.deps.config.get().agents.balanceByQuota,
+        lastUsed: this.deps.store.lastAgentForProject(path),
+      },
+    );
+  }
+
+  private usableAgents(): AgentKind[] {
+    const usable = this.deps.config.get().agents.enabled.filter((kind) => this.deps.adapter(kind));
+    if (!usable.length) {
+      throw new ToolError("No coding agent is set up yet, so Preston cannot start work.");
+    }
+    return usable;
+  }
+
+  /** A Goal's agent when it must start again: the one that already worked on it. */
   private pickAgentOr(goal: Goal): AgentKind {
     const previous = this.deps.store.runsForGoal(goal.id).at(-1)?.agent;
-    return previous ?? this.pickAgent();
+    if (previous) return previous;
+    const chosen = goal.agentChoice?.agent;
+    return chosen && this.deps.adapter(chosen)
+      ? chosen
+      : this.chooseAgentNow(goal.projectPath).agent;
   }
 
   private requireGoal(goalId: string): Goal {
