@@ -85,7 +85,12 @@ describe("stopping an agent stops the tools it started", () => {
       interruptGraceMs: 200,
       spawn: agentSpawn(file) as unknown as SpawnFn,
     });
-    const handle = adapter.startRun({ runId: "r", workdir: tempDir("work"), prompt: "go" });
+    const handle = adapter.startRun({
+      runId: "r",
+      workdir: tempDir("work"),
+      prompt: "go",
+      access: "full",
+    });
     const tool = await waitFor(() => readPid(file), { what: "the tool to start" });
 
     await handle.interrupt();
@@ -102,7 +107,12 @@ describe("stopping an agent stops the tools it started", () => {
       interruptTimeoutMs: 200,
       spawn: agentSpawn(file) as unknown as CodexSpawn,
     });
-    const handle = adapter.startRun({ runId: "r", workdir: tempDir("work"), prompt: "go" });
+    const handle = adapter.startRun({
+      runId: "r",
+      workdir: tempDir("work"),
+      prompt: "go",
+      access: "full",
+    });
     const tool = await waitFor(() => readPid(file), { what: "the tool to start" });
 
     await handle.interrupt();

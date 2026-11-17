@@ -55,7 +55,7 @@ _Avoid_: Notes, context, knowledge base
 ### Communication
 
 **Channel**:
-A conversation surface through which the user talks to Preston and Preston reaches the user: the terminal (opened by running `preston`), WeChat, Discord or Slack. The only user interface.
+A conversation surface through which the user talks to Preston and Preston reaches the user: the terminal (opened by running `preston`), Discord or Slack. The only user interface.
 _Avoid_: Transport, integration, interface
 
 ### Outcomes

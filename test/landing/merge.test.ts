@@ -217,6 +217,7 @@ describe("merges that would publish something", () => {
         agents: { enabled: ["fake"] },
         coordinator: { agent: "fake" },
         setup: { complete: true },
+        outcomes: { coordinatorWaitMs: 0 },
         landing: { autoMergePublishing: true },
       },
       scenario: {
@@ -247,7 +248,7 @@ describe("merges that would publish something", () => {
 
     expect(goal).toMatchObject({ state: "completed", outcome: "verified" });
     expect(p.owner.texts("question")).toEqual([]);
-    expect(p.owner.texts("ack")).toHaveLength(1);
+    expect(p.owner.texts("ack")).toEqual([]);
     expect(p.owner.texts("outcome")).toHaveLength(1);
   });
 
@@ -272,6 +273,7 @@ describe("a hosted repository: pull request, checks, merge", () => {
     agents: { enabled: ["fake" as const] },
     coordinator: { agent: "fake" as const },
     setup: { complete: true },
+    outcomes: { coordinatorWaitMs: 0 },
     landing: {
       ciPollIntervalMs: 20,
       ciStartGraceMs: 0,

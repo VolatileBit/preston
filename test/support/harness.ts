@@ -40,6 +40,8 @@ export const TEST_CONFIG: ConfigPatch = {
   agents: { enabled: ["fake"] },
   coordinator: { agent: "fake" },
   outbox: { baseDelayMs: 1_000, maxDelayMs: 4_000, maxAttempts: 5 },
+  // Tests that are not about the Coordinator speaking get Preston's own outcome message at once.
+  outcomes: { coordinatorWaitMs: 0 },
   setup: { complete: true },
 };
 
@@ -69,6 +71,8 @@ export async function startPreston(options: {
   wrapAdapter?: (adapter: FakeAdapter) => FakeAdapter;
   /** The GitHub client used to land work. Default: GitHub is not available. */
   landing?: RuntimeOptions["landing"];
+  /** Let this runtime update Preston itself, with fakes for npm. */
+  selfUpdate?: RuntimeOptions["selfUpdate"];
 }): Promise<Preston> {
   const home = options.home ?? tempDir("preston-home");
   const channels = options.channels ?? [new FakeChannel()];
@@ -87,6 +91,7 @@ export async function startPreston(options: {
     chatChannels: options.chatChannels,
     initialConfig: options.config ?? TEST_CONFIG,
     landing: options.landing ?? { github: noGitHub },
+    selfUpdate: options.selfUpdate,
   });
   await rt.start();
   let stopped = false;
@@ -181,36 +186,19 @@ export function workerQuestionId(turn: FakeTurn): string | undefined {
   return /asks question (q-[0-9a-f]+)/.exec(turn.input.prompt)?.[1];
 }
 
-/** The approval ID in a Coordinator approval-request event, if this turn is one. */
-export function approvalRequestId(turn: FakeTurn): string | undefined {
-  if (!turn.input.prompt.includes('event="approval-request"')) return undefined;
-  return /asks for approval (a-[0-9a-f]+)/.exec(turn.input.prompt)?.[1];
-}
-
 /**
- * A Coordinator that creates a Goal with `goalBrief` in `projectPath` when told "go". By
- * default it declines escalated approvals as outside the Brief; with `approvals: "pass"` they
- * reach `extra` like any other turn.
+ * A Coordinator that creates a Goal with `goalBrief` in `projectPath` when told "go"; every
+ * other turn reaches `extra`.
  */
 export function goalCreatingCoordinator(
   projectPath: string,
   goalBrief: Record<string, unknown> = brief(),
   extra: FakeScript = () => "",
-  options: { approvals?: "decline" | "pass" } = {},
 ): FakeScript {
   return async (turn) => {
     if (ownerMessage(turn)?.trim() === "go") {
       await turn.callTool("goal_create", { projectPath, brief: goalBrief });
       return "Here's the Brief I drafted.";
-    }
-    const approvalId = approvalRequestId(turn);
-    if (approvalId && options.approvals !== "pass") {
-      await turn.callTool("approval_decide", {
-        approvalId,
-        allow: false,
-        reason: "the Brief's authority does not cover it",
-      });
-      return "";
     }
     return extra(turn);
   };

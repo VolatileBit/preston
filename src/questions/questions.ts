@@ -2,6 +2,7 @@ import type { ChannelHub } from "../channels/hub.js";
 import type { Outbox } from "../channels/outbox.js";
 import type { ChannelKind } from "../channels/types.js";
 import { type Clock, isoNow } from "../clock.js";
+import { pick } from "../i18n/index.js";
 import type { Logger } from "../log.js";
 import { all, type Db, one, run } from "../store/db.js";
 import { newId } from "../util/ids.js";
@@ -230,8 +231,14 @@ export class Questions {
   private fanOut(question: Question): void {
     const goal = question.goalId ? this.deps.goalName(question.goalId) : undefined;
     const text = goal
-      ? `Preston needs your decision on "${goal}":\n${question.humanText ?? question.text}`
-      : `Preston needs your decision:\n${question.humanText ?? question.text}`;
+      ? pick({
+          en: `Preston needs your decision on "${goal}":\n${question.humanText ?? question.text}`,
+          "zh-CN": `Preston 需要您就“${goal}”做个决定：\n${question.humanText ?? question.text}`,
+        })
+      : pick({
+          en: `Preston needs your decision:\n${question.humanText ?? question.text}`,
+          "zh-CN": `Preston 需要您做个决定：\n${question.humanText ?? question.text}`,
+        });
     this.deps.outbox.broadcast({
       kind: "question",
       text,

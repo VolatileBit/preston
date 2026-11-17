@@ -81,6 +81,8 @@ export interface WorkerReport {
   checksPerformed: string[];
   suggestedVerificationCommands: string[];
   blockers: string[];
+  /** Files the user should receive with the result (older reports have none). */
+  deliverables?: string[];
 }
 
 export interface Run {

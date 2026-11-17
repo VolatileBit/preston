@@ -31,9 +31,8 @@ describe("a Goal from chat to outcome", () => {
 
     expect(goal).toMatchObject({ state: "completed", outcome: "verified" });
     expect(existsSync(join(project, "checked-by-preston.txt"))).toBe(true);
-    expect(p.owner.texts("ack")).toEqual([
-      "On it: Make the greeting page say hello\nI'll let you know when it's done.",
-    ]);
+    // Preston sends no acknowledgement of its own: the Coordinator's reply is the only voice.
+    expect(p.owner.texts("ack")).toEqual([]);
     expect(p.owner.texts("reply")).toEqual(["Here's the Brief I drafted."]);
     const [outcome] = p.owner.texts("outcome");
     expect(outcome).toContain("Done and verified");

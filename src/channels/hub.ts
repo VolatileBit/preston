@@ -1,5 +1,6 @@
 import { type Clock, isoNow } from "../clock.js";
 import { errorMessage, type Logger } from "../log.js";
+import { saveReceivedFile } from "./shared/files.js";
 import type { Channel, ChannelKind, ChannelStatus, InboundMessage } from "./types.js";
 
 /**
@@ -33,6 +34,8 @@ export class ChannelHub {
     private readonly log: Logger,
     private readonly clock: Clock,
     private readonly notifier?: HostNotifier,
+    /** Where files the user sends are kept. */
+    private readonly attachmentsDir?: string,
   ) {}
 
   register(channel: Channel): void {
@@ -124,6 +127,10 @@ export class ChannelHub {
           if (current()) this.setStatus(channel.kind, status, detail);
         },
         notifyHost: (text) => this.notifyHost(channel.kind, text),
+        saveFile: async (name, data) => {
+          if (!this.attachmentsDir) throw new Error("This Preston keeps no files");
+          return saveReceivedFile(this.attachmentsDir, name, data);
+        },
         log: (level, message, data) => log[level](message, data),
       });
     } catch (err) {

@@ -4,6 +4,7 @@
  * tests replace it with a fake.
  */
 import { App, type Logger, LogLevel, SocketModeReceiver, webApi } from "@slack/bolt";
+import type { IncomingFile } from "../shared/files.js";
 import type { ChannelLogger } from "../shared/secrets.js";
 
 export interface SlackIdentity {
@@ -22,6 +23,8 @@ export interface SlackIncoming {
   /** Absent for an ordinary message written by a person. */
   subtype?: string;
   text: string;
+  /** Files shared in the message (Slack keeps them on its own servers). */
+  files?: IncomingFile[];
 }
 
 export interface SlackTransportHandlers {
@@ -48,6 +51,14 @@ export interface SlackTransport {
   /** `channel` may be a user id, which posts to the app's DM with that user. */
   postMessage(channel: string, text: string): Promise<{ channel: string; ts: string }>;
   addReaction(channel: string, ts: string, name: string): Promise<void>;
+  /** Fetches a file Slack holds (needs the `files:read` scope). */
+  download(file: IncomingFile): Promise<Uint8Array>;
+  /** Uploads files to a conversation, with `text` as their comment. */
+  uploadFiles(
+    channel: string,
+    text: string,
+    files: { name: string; data: Buffer }[],
+  ): Promise<void>;
 }
 
 export type CreateSlackTransport = (
@@ -103,6 +114,7 @@ export const createBoltTransport: CreateSlackTransport = ({ botToken, appToken }
           botId: str(e.bot_id),
           subtype: str(e.subtype),
           text: typeof e.text === "string" ? e.text : "",
+          files: slackFiles(e.files),
         });
       });
       a.error(async (error) => log("warn", "Slack event handling failed", error));
@@ -141,6 +153,27 @@ export const createBoltTransport: CreateSlackTransport = ({ botToken, appToken }
     async addReaction(channel, ts, name) {
       await live().client.reactions.add({ channel, timestamp: ts, name });
     },
+
+    async download(file) {
+      const response = await fetch(file.url, { headers: { Authorization: `Bearer ${botToken}` } });
+      if (!response.ok) throw new Error(`Slack returned HTTP ${response.status} for the file`);
+      // Without the files:read scope Slack answers with a sign-in page instead of the file.
+      if (
+        response.headers.get("content-type")?.startsWith("text/html") &&
+        !file.mimeType?.startsWith("text/html")
+      ) {
+        throw new Error("Slack did not give the file; the app may lack the files:read permission");
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    },
+
+    async uploadFiles(channel, text, files) {
+      await live().client.filesUploadV2({
+        channel_id: channel,
+        ...(text ? { initial_comment: text } : {}),
+        file_uploads: files.map((f) => ({ file: f.data, filename: f.name })),
+      });
+    },
   };
 };
 
@@ -152,6 +185,23 @@ function describe(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+/** The files of a Slack message event, as downloadable descriptions. */
+function slackFiles(value: unknown): IncomingFile[] {
+  if (!Array.isArray(value)) return [];
+  const files: IncomingFile[] = [];
+  for (const item of value as Record<string, unknown>[]) {
+    const url = str(item.url_private_download) ?? str(item.url_private);
+    if (!url) continue;
+    files.push({
+      name: str(item.name) ?? str(item.title) ?? "file",
+      url,
+      size: typeof item.size === "number" ? item.size : undefined,
+      mimeType: str(item.mimetype),
+    });
+  }
+  return files;
 }
 
 function str(value: unknown): string | undefined {

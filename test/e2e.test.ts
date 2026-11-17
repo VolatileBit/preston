@@ -85,6 +85,8 @@ export default {
 `,
   );
 
+  // Preston's own outcome message at once, since this test is not about the Coordinator speaking.
+  writeFileSync(join(home, "config.json"), JSON.stringify({ outcomes: { coordinatorWaitMs: 0 } }));
   const first = spawnDaemon(home, scenario);
   const client = await connect(home);
   const before: { kind: string; text: string }[] = [];
@@ -103,7 +105,7 @@ export default {
     timeoutMs: 15_000,
   });
   await waitFor(() => existsSync(started), { what: "the Worker to start", timeoutMs: 15_000 });
-  expect(before.map((m) => m.kind)).toEqual(["ack", "reply"]);
+  expect(before.map((m) => m.kind)).toEqual(["reply"]);
 
   first.kill("SIGKILL");
   await exited(first);

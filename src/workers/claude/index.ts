@@ -5,7 +5,8 @@
  *   claude -p --input-format stream-json --output-format stream-json --verbose
  *          (--session-id <new uuid> | --resume <id>) [--model m] [--effort e]
  *          [--append-system-prompt-file <tmp>]
- *          (--mcp-config <tmp> --permission-prompt-tool mcp__preston__approve | --permission-prompts none)
+ *          [--mcp-config <tmp>]
+          (--dangerously-skip-permissions | --tools "" --allowedTools mcp__preston)
  * run in the Run's workdir (Sessions are stored per working directory, so a resume must use the
  * same one). The prompt goes in as one stream-json user message on stdin; stdin is closed after
  * the first `result` so the CLI exits once any background work is done. Preston never reads or
@@ -43,15 +44,6 @@ export type { SpawnedProcess, SpawnFn, SpawnOptionsLite } from "./process.js";
 
 /** Name of Preston's MCP server in the config handed to Claude Code. */
 export const PRESTON_MCP_SERVER_NAME = "preston";
-/**
- * Tool Preston's MCP server must expose for Claude Code's permission prompts (ADR 0003).
- * Claude Code calls it with `{ tool_name, input, tool_use_id }` and expects one text content block
- * whose text is `{"behavior":"allow"}` (optionally with `updatedInput`) or
- * `{"behavior":"deny","message":"<reason>"}`, and no `structuredContent`.
- */
-export const PRESTON_PERMISSION_TOOL = "approve";
-const PERMISSION_TOOL_FULL_NAME = `mcp__${PRESTON_MCP_SERVER_NAME}__${PRESTON_PERMISSION_TOOL}`;
-
 export interface ClaudeAdapterOptions {
   /** Path or command name of the `claude` executable; found on PATH when omitted. */
   executable?: string;
@@ -296,10 +288,21 @@ function startClaudeRun(input: StartRunInput, ctx: RunContext): RunHandle {
         mode: 0o600,
       });
       // No --strict-mcp-config: the user's own MCP servers still load.
-      args.push("--mcp-config", file, "--permission-prompt-tool", PERMISSION_TOOL_FULL_NAME);
+      args.push("--mcp-config", file);
+    }
+    if (input.access === "full") {
+      // ADR 0003: Workers run unattended with everything the user's account can do.
+      args.push("--dangerously-skip-permissions");
     } else {
-      // Nobody can answer permission prompts, so deny them instead of waiting.
-      args.push("--permission-prompts", "none");
+      // No built-in tools at all, whatever the user's own allow rules say; only Preston's tools.
+      args.push(
+        "--tools",
+        "",
+        "--permission-prompts",
+        "none",
+        "--allowedTools",
+        `mcp__${PRESTON_MCP_SERVER_NAME}`,
+      );
     }
     const launch = launchCommand(ctx.exe, args, ctx.env, ctx.platform);
     child = ctx.spawn(launch.command, launch.args, {

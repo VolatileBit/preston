@@ -5,7 +5,7 @@ import { createRuntime } from "../src/runtime.js";
 import type { CommandOptions, CommandResult } from "../src/util/command.js";
 import { onCleanup, TEST_CONFIG, tempDir } from "./support/harness.js";
 
-const MALICIOUS = `Lost "WeChat" '; do shell script "rm -rf ~" -- $(touch /tmp/pwned) \`id\` & del C:\\ | %PATH% <b>`;
+const MALICIOUS = `Lost "Slack" '; do shell script "rm -rf ~" -- $(touch /tmp/pwned) \`id\` & del C:\\ | %PATH% <b>`;
 
 function recorder(respond: (command: string) => Partial<CommandResult> = () => ({})) {
   const calls: { command: string; args: readonly string[]; options?: CommandOptions }[] = [];
@@ -81,7 +81,7 @@ test("Windows: the toast script is fixed and the text travels in the environment
   });
   const script = Buffer.from(TOAST_COMMAND, "base64").toString("utf16le");
   expect(script).toContain("CreateTextNode($env:PRESTON_NOTIFY_TEXT)");
-  expect(script).not.toContain("WeChat");
+  expect(script).not.toContain("Slack");
 });
 
 test("Windows: falls back to msg when toasts are unavailable", async () => {
@@ -111,7 +111,7 @@ test("the same text is shown once per window, and bursts are rate limited", asyn
   let now = 0;
   const { calls, run } = recorder();
   const notifier = createHostNotifier({ platform: "darwin", run, now: () => now });
-  const lost = "Preston lost its WeChat connection — run `preston` to reconnect.";
+  const lost = "Preston lost its Slack connection — run `preston` to reconnect.";
 
   expect(await notifier.notify(lost)).toMatchObject({ shown: true });
   now += 60_000;
@@ -140,7 +140,7 @@ test("a Channel's notifyHost reaches the runtime's host notifier", async () => {
   const shown: string[] = [];
   let ctx: ChannelContext | undefined;
   const channel: Channel = {
-    kind: "wechat",
+    kind: "fake",
     capabilities: { reactions: false, proactive: "windowed" },
     start: async (c) => {
       ctx = c;
@@ -158,8 +158,8 @@ test("a Channel's notifyHost reaches the runtime's host notifier", async () => {
   await rt.start();
   onCleanup(() => rt.stop());
 
-  ctx?.notifyHost("Preston lost its WeChat connection — run `preston` to reconnect.");
+  ctx?.notifyHost("Preston lost its Slack connection — run `preston` to reconnect.");
   await Promise.resolve();
 
-  expect(shown).toEqual(["Preston lost its WeChat connection — run `preston` to reconnect."]);
+  expect(shown).toEqual(["Preston lost its Slack connection — run `preston` to reconnect."]);
 });

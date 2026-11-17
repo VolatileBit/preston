@@ -8,11 +8,10 @@ import type { Config } from "../config/schema.js";
 import type { GoalEvent } from "../goals/engine.js";
 import { signInHow } from "../goals/messages.js";
 import type { GoalStore } from "../goals/store.js";
+import { coordinatorLanguageGuidance, pick } from "../i18n/index.js";
 import { errorMessage, type Logger } from "../log.js";
 import { COORDINATOR_RUN_ID } from "../mcp/names.js";
 import type { Tokens } from "../mcp/tools.js";
-import { decide, nativeAction } from "../policy/approvals.js";
-import type { Approval } from "../policy/escalations.js";
 import { COORDINATOR_GUIDANCE } from "../prompts/coordinator.js";
 import { GRILLING_GUIDANCE } from "../prompts/grilling.js";
 import { TEACHING_GUIDANCE } from "../prompts/teaching.js";
@@ -70,8 +69,6 @@ export interface CoordinatorDeps {
    * known about the user). Unchanged text keeps prompt caching effective.
    */
   contextBlocks?(): string[];
-  /** An escalated approval and the Brief authority it is judged against. */
-  approval(id: string): { approval: Approval; authority: string } | undefined;
 }
 
 type TurnEnd = Exclude<WorkerEvent, { type: "activity" | "message" | "exited" | "started" }>;
@@ -88,6 +85,7 @@ type TurnEnd = Exclude<WorkerEvent, { type: "activity" | "message" | "exited" | 
 export class Coordinator {
   private queue: Promise<void> = Promise.resolve();
   private active: Invocation | undefined;
+  private readonly busyListeners = new Set<(busy: boolean, target?: ReplyTarget) => void>();
   private handle: RunHandle | undefined;
   private stopping = false;
   private invocations = 0;
@@ -150,6 +148,21 @@ export class Coordinator {
     return this.queue;
   }
 
+  /** Tells `listener` whenever the Coordinator starts or stops thinking; returns an unsubscribe. */
+  onBusyChange(listener: (busy: boolean, target?: ReplyTarget) => void): () => void {
+    this.busyListeners.add(listener);
+    return () => this.busyListeners.delete(listener);
+  }
+
+  isBusy(): boolean {
+    return this.active !== undefined;
+  }
+
+  /** `target` is the conversation being answered, so a Channel can show "typing…" there. */
+  private setBusy(busy: boolean, target?: ReplyTarget): void {
+    for (const listener of this.busyListeners) listener(busy, target);
+  }
+
   async stop(): Promise<void> {
     this.stopping = true;
     for (const timer of this.retries) timer.cancel();
@@ -168,20 +181,9 @@ export class Coordinator {
     if (input.kind === "message" && input.inboundId !== undefined) {
       if (!this.deps.inbox.get(input.inboundId)) return; // Handled meanwhile.
     }
-    const approval = input.kind === "approval" ? this.deps.approval(input.approvalId) : undefined;
     const question =
-      input.kind === "worker_question"
-        ? questions.find(input.questionId)
-        : approval
-          ? questions.find(approval.approval.questionId)
-          : undefined;
+      input.kind === "worker_question" ? questions.find(input.questionId) : undefined;
     if (input.kind === "worker_question" && question?.state !== "pending_coordinator") return;
-    if (
-      input.kind === "approval" &&
-      (approval?.approval.state !== "pending" || question?.state !== "pending_coordinator")
-    ) {
-      return;
-    }
 
     const replyTo = replyTarget(input);
     const settings = config.get().coordinator;
@@ -191,7 +193,10 @@ export class Coordinator {
       this.answer(
         input,
         replyTo,
-        "I don't have an agent to think with yet. Run `preston` in a terminal to finish setting me up.",
+        pick({
+          en: "I don't have an agent to think with yet. Run `preston` in a terminal to finish setting me up.",
+          "zh-CN": "我还没有可用来思考的助手。请在终端运行 `preston` 完成设置。",
+        }),
       );
       this.escalateUnhandled(input);
       this.finishEvent(input);
@@ -222,7 +227,6 @@ export class Coordinator {
         openQuestions: questions.open(),
       },
       question,
-      approval,
     );
     // The configured model belongs to the primary agent; another agent uses its own defaults.
     const resolved = await this.deps.models.coordinator(agent, agent === primary ? settings : {});
@@ -232,6 +236,7 @@ export class Coordinator {
       this.deps.inbox.started(input.inboundId);
     }
     this.active = { input, replyTo, agent };
+    this.setBusy(true, replyTo);
     let end: TurnEnd | undefined;
     let sessionStarted = false;
     let tracking: Promise<void> = Promise.resolve();
@@ -245,6 +250,7 @@ export class Coordinator {
           COORDINATOR_GUIDANCE,
           GRILLING_GUIDANCE,
           TEACHING_GUIDANCE,
+          coordinatorLanguageGuidance(config.get().language),
           ...(this.deps.contextBlocks?.() ?? []),
         ]
           .filter(Boolean)
@@ -252,8 +258,7 @@ export class Coordinator {
         model,
         effort,
         mcp: this.deps.mcpLaunch(token),
-        onApproval: async (request) =>
-          decide(nativeAction(request), { workdir: this.deps.workdir }).decision,
+        access: "tools_only",
         transcriptPath: join(
           this.deps.transcriptsDir,
           "coordinator",
@@ -292,6 +297,7 @@ export class Coordinator {
     } finally {
       this.active = undefined;
       this.handle = undefined;
+      this.setBusy(false, replyTo);
       tokens.revoke(token);
       await tracking;
       // On shutdown the record stays: the next start verifies the process really is gone.
@@ -481,19 +487,8 @@ export class Coordinator {
     if (input.kind === "goal_event") this.deps.goalEventHandled(input);
   }
 
-  /** A Worker question or approval the Coordinator could not handle goes to the user as asked. */
+  /** A Worker question the Coordinator could not handle goes to the user as asked. */
   private escalateUnhandled(input: CoordinatorInput): void {
-    if (input.kind === "approval") {
-      const approval = this.deps.approval(input.approvalId)?.approval;
-      const question = approval && this.deps.questions.find(approval.questionId);
-      if (approval?.state !== "pending" || question?.state !== "pending_coordinator") return;
-      this.deps.log.info("escalating unhandled approval", { approvalId: approval.id });
-      this.deps.questions.escalate(
-        question.id,
-        `A Worker wants to ${approval.summary}, which needs your approval because ${approval.policyReason}. Shall I allow it? Reply yes or no.`,
-      );
-      return;
-    }
     if (input.kind !== "worker_question") return;
     const question = this.deps.questions.find(input.questionId);
     if (question?.state === "pending_coordinator") {
@@ -528,18 +523,30 @@ export class Coordinator {
 /** The deterministic reply while the Coordinator's own agent cannot think. */
 function queuedText(agent: AgentKind, bucket: Bucket, now: number): string {
   const who = agentLabel(agent);
-  const fixed = "You can still say status, stop, pause or resume.";
+  const fixed = pick({
+    en: "You can still say status, stop, pause or resume.",
+    "zh-CN": "您仍然可以发送 status、stop、pause 或 resume（或：状态、停止、暂停、继续）。",
+  });
   switch (bucket.state) {
     case "auth_broken":
-      return `${who}, the agent I think with, needs you to sign in again. ${signInHow(agent)} I'll answer this once you have. ${fixed}`;
+      return pick({
+        en: `${who}, the agent I think with, needs you to sign in again. ${signInHow(agent)} I'll answer this once you have. ${fixed}`,
+        "zh-CN": `我用来思考的助手 ${who} 需要您重新登录。${signInHow(agent)} 您登录后我会回答这条消息。${fixed}`,
+      });
     case "spend_blocked":
-      return `${who}, the agent I think with, has reached its spending limit, so I'll answer this when it has quota again. I won't buy credits. ${fixed}`;
+      return pick({
+        en: `${who}, the agent I think with, has reached its spending limit, so I'll answer this when it has quota again. I won't buy credits. ${fixed}`,
+        "zh-CN": `我用来思考的助手 ${who} 已达到消费上限，额度恢复后我会回答这条消息。我不会购买额度。${fixed}`,
+      });
     default: {
-      const until =
+      const when =
         bucket.resetsAt && Date.parse(bucket.resetsAt) > now
-          ? ` until ${formatResetTime(bucket.resetsAt, now)}`
-          : "";
-      return `My own agent (${who}) is out of quota${until}, so I'll answer this when it's back. ${fixed}`;
+          ? formatResetTime(bucket.resetsAt, now)
+          : undefined;
+      return pick({
+        en: `My own agent (${who}) is out of quota${when ? ` until ${when}` : ""}, so I'll answer this when it's back. ${fixed}`,
+        "zh-CN": `我自己的助手（${who}）额度已用完${when ? `，将在 ${when} 恢复` : ""}，恢复后我会回答这条消息。${fixed}`,
+      });
     }
   }
 }
@@ -547,6 +554,7 @@ function queuedText(agent: AgentKind, bucket: Bucket, now: number): string {
 function queueKey(input: CoordinatorInput): string | undefined {
   if (input.kind === "message" && input.inboundId !== undefined) return `m:${input.inboundId}`;
   if (input.kind === "goal_event") return `e:${input.runId}`;
+  if (input.kind === "goal_outcome") return `o:${input.runId}`;
   return undefined;
 }
 
@@ -562,7 +570,7 @@ function replyTarget(input: CoordinatorInput): ReplyTarget | undefined {
       return { channel: input.channel, conversationId: input.conversationId };
     case "worker_question":
     case "goal_event":
-    case "approval":
+    case "goal_outcome":
       return undefined;
   }
 }

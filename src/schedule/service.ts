@@ -7,6 +7,7 @@ import type { Brief } from "../goals/brief.js";
 import { type CheckResult, runCheck } from "../goals/checks.js";
 import type { GoalEngine } from "../goals/engine.js";
 import type { GoalStore, Origin } from "../goals/store.js";
+import { pick } from "../i18n/index.js";
 import { errorMessage, type Logger } from "../log.js";
 import { type Db, transaction } from "../store/db.js";
 import {
@@ -393,7 +394,6 @@ export class Scheduler {
           brief,
           origin: schedule.delivery === "origin" ? (schedule.origin ?? undefined) : undefined,
           sourceKey: `schedule:${schedule.id}:${run.scheduledFor}`,
-          quiet: true,
           // Linked before the first Worker turn so its guidance can include the schedule's orders.
           onCreated: (g) => store.update(run.id, { goalId: g.id, state: "running" }),
         });
@@ -406,7 +406,10 @@ export class Scheduler {
           schedule,
           run,
           "caught-up",
-          `I wasn't running when "${schedule.name}" was due (${formatLocal(Date.parse(run.scheduledFor), schedule.timezone)}), so I started it now.`,
+          pick({
+            en: `I wasn't running when "${schedule.name}" was due (${formatLocal(Date.parse(run.scheduledFor), schedule.timezone)}), so I started it now.`,
+            "zh-CN": `“${schedule.name}”到点时我没有在运行（${formatLocal(Date.parse(run.scheduledFor), schedule.timezone)}），所以现在补上了。`,
+          }),
         );
       }
     } catch (err) {
@@ -417,7 +420,10 @@ export class Scheduler {
         schedule,
         run,
         "failed",
-        `I couldn't start the scheduled job "${schedule.name}": ${reason}`,
+        pick({
+          en: `I couldn't start the scheduled job "${schedule.name}": ${reason}`,
+          "zh-CN": `无法启动定时任务“${schedule.name}”：${reason}`,
+        }),
       );
     }
   }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { languageSchema } from "../i18n/index.js";
 
 const MINUTE = 60_000;
 const ms = (fallback: number) => z.number().int().positive().default(fallback);
@@ -16,6 +17,8 @@ const modelSettings = {
  * rejected so typos are caught; Channel sections are validated by each Channel.
  */
 export const configSchema = z.strictObject({
+  /** The language Preston speaks to the user in (see src/i18n). */
+  language: languageSchema.default("en"),
   agents: z
     .strictObject({
       /** Agent CLIs Preston may use, in order of preference. */
@@ -59,19 +62,6 @@ export const configSchema = z.strictObject({
     .strictObject({
       /** How long `ask_preston` waits for the Coordinator before parking the Worker. */
       workerWaitMs: z.number().int().positive().default(45_000),
-    })
-    .prefault({}),
-  approvals: z
-    .strictObject({
-      /**
-       * How long an escalated approval keeps the Worker waiting for a decision. After that the
-       * request is declined for now; a later "allow" resumes the Worker's Session.
-       */
-      escalationWaitMs: z
-        .number()
-        .int()
-        .positive()
-        .default(2 * 60_000),
     })
     .prefault({}),
   quota: z
@@ -143,6 +133,29 @@ export const configSchema = z.strictObject({
         .int()
         .positive()
         .default(10 * 60_000),
+    })
+    .prefault({}),
+  outcomes: z
+    .strictObject({
+      /**
+       * How long the Coordinator has to tell the user in its own words that a Goal finished (it
+       * can also hold the message until a time the user chose). If it has not by then, Preston's
+       * own standard message goes out. 0 sends Preston's standard message at once and the
+       * Coordinator is not asked.
+       */
+      coordinatorWaitMs: z
+        .number()
+        .int()
+        .min(0)
+        .default(3 * MINUTE),
+    })
+    .prefault({}),
+  selfUpdate: z
+    .strictObject({
+      /** Keep Preston itself current when it was installed with `npm install -g`. */
+      enabled: z.boolean().default(true),
+      /** How often npm is asked for a newer version. */
+      checkIntervalMs: ms(6 * 60 * MINUTE),
     })
     .prefault({}),
   setup: z

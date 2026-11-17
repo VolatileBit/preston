@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { webApi } from "@slack/bolt";
 import { describe, expect, test } from "vitest";
 import {
@@ -32,6 +35,9 @@ class FakeSlack {
   connected = false;
   connects = 0;
   posted: Array<{ channel: string; text: string }> = [];
+  uploaded: Array<{ channel: string; text: string; files: string[] }> = [];
+  /** Contents of the files Slack holds, by URL. */
+  held: Record<string, string> = {};
   reactions: Array<{ channel: string; ts: string; name: string }> = [];
   connectError: (() => unknown) | undefined;
   postErrors: unknown[] = [];
@@ -69,6 +75,18 @@ class FakeSlack {
       if (this.reactionError) throw this.reactionError;
       this.reactions.push({ channel, ts, name });
     },
+    download: async (file) => {
+      const held = this.held[file.url];
+      if (held === undefined) throw new Error("HTTP 404");
+      return Buffer.from(held);
+    },
+    uploadFiles: async (channel, text, files) => {
+      this.uploaded.push({
+        channel,
+        text,
+        files: files.map((f) => `${f.name}=${f.data.toString()}`),
+      });
+    },
   });
 
   dm(userId: string, text: string, extra: Partial<SlackIncoming> = {}): void {
@@ -89,10 +107,16 @@ function fakeContext() {
   const statuses: Array<{ status: ChannelStatus; detail?: string }> = [];
   const logs: unknown[] = [];
   const notifications: string[] = [];
+  const saved = mkdtempSync(join(tmpdir(), "preston-slack-"));
   const ctx: ChannelContext = {
     onMessage: (m) => messages.push(m),
     setStatus: (status, detail) => statuses.push({ status, ...(detail ? { detail } : {}) }),
     notifyHost: (text) => notifications.push(text),
+    saveFile: async (name, data) => {
+      const path = join(saved, name);
+      writeFileSync(path, data);
+      return path;
+    },
     log: (level, message, data) => logs.push({ level, message, data }),
   };
   return { ctx, messages, statuses, logs, notifications };
@@ -132,6 +156,8 @@ describe("Slack app manifest", () => {
       "chat:write",
       "im:history",
       "reactions:write",
+      "files:read",
+      "files:write",
     ]);
     expect(manifest.features.bot_user.display_name).toBe("My Preston");
     expect(manifest.features.app_home).toMatchObject({
@@ -389,5 +415,71 @@ describe("Slack Channel connection", () => {
     expect(everything).not.toContain(BOT_TOKEN);
     expect(everything).not.toContain(APP_TOKEN);
     expect(everything).not.toContain(BOT_TOKEN.slice(0, 20));
+  });
+});
+
+describe("Slack Channel files", () => {
+  const doc = (url = "https://files.slack/report.pdf") => ({
+    name: "report.pdf",
+    url,
+    size: 3,
+    mimeType: "application/pdf",
+  });
+  const waitFor = async (check: () => boolean) => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(check()).toBe(true);
+  };
+
+  test("the owner's files are kept on this computer and described to the Coordinator", async () => {
+    const { fake, channel, ctx, messages } = setup();
+    await channel.start(ctx);
+    fake.held["https://files.slack/report.pdf"] = "PDF";
+    fake.dm(OWNER, "summarise this", { subtype: "file_share", files: [doc()] });
+    await waitFor(() => messages.length === 1);
+    expect(messages[0]?.text).toMatch(
+      /^summarise this\n\n\[Files the user attached, saved on this computer:\n- \S+report\.pdf \(application\/pdf, 3 B\)/,
+    );
+  });
+
+  test("files are uploaded with the text as their comment", async () => {
+    const { fake, channel, ctx } = setup();
+    await channel.start(ctx);
+    const dir = mkdtempSync(join(tmpdir(), "preston-out-"));
+    const path = join(dir, "chart.png");
+    writeFileSync(path, "PNG!");
+    const result = await channel.send({
+      text: "Here it is.",
+      kind: "reply",
+      files: [{ path, name: "chart.png" }],
+    });
+    expect(result.status).toBe("delivered");
+    expect(fake.uploaded).toEqual([
+      { channel: DM, text: "Here it is.", files: ["chart.png=PNG!"] },
+    ]);
+    expect(fake.posted).toEqual([]);
+  });
+
+  test("a failed download is reported, and a stranger's file is never fetched", async () => {
+    const { fake, channel, ctx, messages } = setup();
+    await channel.start(ctx);
+    fake.dm(OWNER, "look", { files: [doc("https://files.slack/gone.pdf")] });
+    await waitFor(() => messages.length === 1);
+    expect(messages[0]?.text).toContain("report.pdf could not be downloaded.");
+    fake.dm(STRANGER, "hi", { files: [doc()] });
+    expect(messages[1]).toMatchObject({ isOwner: false, text: "hi" });
+  });
+});
+
+describe("Slack Channel presence", () => {
+  test("a read receipt is an :eyes: reaction on the owner's message", async () => {
+    const { fake, channel, ctx } = setup();
+    await channel.start(ctx);
+    await channel.acknowledge?.(`${DM}:1794823200.000100`);
+    expect(fake.reactions).toEqual([{ channel: DM, ts: "1794823200.000100", name: "eyes" }]);
+  });
+
+  test("Slack has no typing indicator for apps, so there is none to show", async () => {
+    const { channel } = setup();
+    expect(channel.setTyping).toBeUndefined();
   });
 });

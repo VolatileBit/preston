@@ -10,8 +10,10 @@ import {
   MessageType,
   Partials,
   type RateLimitData,
+  type RESTOptions,
   Routes,
 } from "discord.js";
+import type { IncomingFile } from "../shared/files.js";
 import type { ChannelLogger } from "../shared/secrets.js";
 
 /**
@@ -25,6 +27,17 @@ export const DISCORD_PARTIALS = [Partials.Channel] as const;
 
 /** Short rate-limit waits are absorbed by discord.js; longer ones fail fast to the outbox. */
 const MAX_RATE_LIMIT_WAIT_MS = 5_000;
+
+export const DISCORD_REST_OPTIONS: Partial<RESTOptions> = {
+  rejectOnRateLimit: (data: RateLimitData) =>
+    data.global || data.timeToReset > MAX_RATE_LIMIT_WAIT_MS,
+  // discord.js builds uploads with the global FormData but sends them with its own copy of
+  // undici, which refuses a FormData from anywhere else ("created by this undici package
+  // instance"). Which one wins depends on what else the process loaded (Slack's library broke
+  // it), so every request goes through Node's own fetch, which accepts the global FormData.
+  makeRequest: ((url: string, init: RequestInit) =>
+    fetch(url, init)) as unknown as RESTOptions["makeRequest"],
+};
 
 export interface DiscordIdentity {
   botUserId: string;
@@ -41,6 +54,8 @@ export interface DiscordIncoming {
   /** An ordinary message or reply written by a person, not a system notice. */
   isUserMessage: boolean;
   content: string;
+  /** Files attached to the message (Discord keeps them on its own servers). */
+  attachments?: IncomingFile[];
   createdAt: Date;
 }
 
@@ -59,8 +74,17 @@ export interface DiscordTransport {
   /** Opens (or reuses) the DM channel with a user and returns its id. */
   openDm(userId: string): Promise<string>;
   /** Returns the new message id. */
-  sendMessage(channelId: string, text: string, replyTo?: string): Promise<string>;
+  sendMessage(
+    channelId: string,
+    text: string,
+    replyTo?: string,
+    files?: { name: string; data: Buffer }[],
+  ): Promise<string>;
+  /** Fetches an attachment Discord holds. */
+  download(file: IncomingFile): Promise<Uint8Array>;
   addReaction(channelId: string, messageId: string, emoji: string): Promise<void>;
+  /** Shows "typing…" in a conversation for about ten seconds. */
+  sendTyping(channelId: string): Promise<void>;
 }
 
 export type CreateDiscordTransport = (botToken: string, log: ChannelLogger) => DiscordTransport;
@@ -81,10 +105,7 @@ export const createDiscordJsTransport: CreateDiscordTransport = (botToken, log) 
       const c = new Client({
         intents: [...DISCORD_INTENTS],
         partials: [...DISCORD_PARTIALS],
-        rest: {
-          rejectOnRateLimit: (data: RateLimitData) =>
-            data.global || data.timeToReset > MAX_RATE_LIMIT_WAIT_MS,
-        },
+        rest: DISCORD_REST_OPTIONS,
       });
       client = c;
 
@@ -98,6 +119,12 @@ export const createDiscordJsTransport: CreateDiscordTransport = (botToken, log) 
           isUserMessage:
             !m.system && (m.type === MessageType.Default || m.type === MessageType.Reply),
           content: m.content,
+          attachments: [...m.attachments.values()].map((a) => ({
+            name: a.name,
+            url: a.url,
+            size: a.size,
+            mimeType: a.contentType ?? undefined,
+          })),
           createdAt: m.createdAt,
         });
       });
@@ -149,13 +176,24 @@ export const createDiscordJsTransport: CreateDiscordTransport = (botToken, log) 
       return channel.id;
     },
 
-    async sendMessage(channelId, text, replyTo) {
+    async sendMessage(channelId, text, replyTo, files) {
       const body: Record<string, unknown> = { content: text, allowed_mentions: { parse: [] } };
       if (replyTo) body.message_reference = { message_id: replyTo, fail_if_not_exists: false };
-      const message = (await live().rest.post(Routes.channelMessages(channelId), { body })) as {
-        id: string;
-      };
+      const message = (await live().rest.post(Routes.channelMessages(channelId), {
+        body,
+        ...(files?.length ? { files } : {}),
+      })) as { id: string };
       return message.id;
+    },
+
+    async download(file) {
+      const response = await fetch(file.url);
+      if (!response.ok) throw new Error(`Discord returned HTTP ${response.status} for the file`);
+      return new Uint8Array(await response.arrayBuffer());
+    },
+
+    async sendTyping(channelId) {
+      await live().rest.post(Routes.channelTyping(channelId));
     },
 
     async addReaction(channelId, messageId, emoji) {

@@ -31,12 +31,12 @@ Installation is `npm i -g @polyweave/preston` (MIT licence). After that, the onl
 - It starts Preston as a background service that restarts at login.
 - It opens an agentic conversation in the terminal, which walks the user through any unfinished setup and fixes problems along the way.
 
-After setup the user talks to Preston from the terminal, Discord, Slack or WeChat. Preston runs on macOS, Windows and Linux.
+After setup the user talks to Preston from the terminal, Discord or Slack. Preston runs on macOS, Windows and Linux.
 
 ## User Stories
 
 - As a user, I install Preston from npm and run `preston`, and a conversation sets everything up with me, including fixing unexpected problems on my machine.
-- As a user, I create my own Discord bot, Slack app and WeChat pairing with Preston guiding me step by step, using links, a ready-to-paste Slack app manifest, and checks that each step worked. Where my agent supports computer use, Preston offers to do the clicking.
+- As a user, I create my own Discord bot and Slack app with Preston guiding me step by step, using links, a ready-to-paste Slack app manifest, and checks that each step worked. Where my agent supports computer use, Preston offers to do the clicking.
 - As a user, I tell Preston what I want in chat. Preston grills me in plain, non-technical language to sharpen the Brief, or drafts the Brief itself and starts immediately if I'm in a hurry.
 - As a user, I leave Preston working for hours or days, and it keeps going through stalls, crashes, restarts and quota limits without me rebuilding context.
 - As a user, I get told when Preston takes on a Goal, when it needs my decision, and its final result (Verified, Unverified or Blocked), and nothing routine.
@@ -53,21 +53,21 @@ After setup the user talks to Preston from the terminal, Discord, Slack or WeCha
 
 - **Package:** npm package `@polyweave/preston`, MIT licence, providing a single executable `preston`. TypeScript on Node.js.
 - **Platforms:** macOS, Windows and Linux are all first-class.
-- **Starting Preston:** running `preston` ensures the background service is running and registered to start at login, then opens the terminal conversation. Running it again resumes any incomplete setup (for example, a re-pair after a lost WeChat login).
+- **Starting Preston:** running `preston` ensures the background service is running and registered to start at login, then opens the terminal conversation. Running it again resumes any incomplete setup.
   - **Proposed:** use launchd (macOS), a systemd user unit (Linux) and a per-user scheduled task (Windows).
-- **Topology:** single user, single host. The user's Preston instance is the server for their own Slack app, Discord bot and WeChat pairing. All three Channels connect outward from the host (Slack Socket Mode, Discord Gateway, WeChat long-poll), so no public URL, port forwarding or tunnel is needed.
+- **Topology:** single user, single host. The user's Preston instance is the server for their own Slack app and Discord bot. Both Channels connect outward from the host (Slack Socket Mode, Discord Gateway), so no public URL, port forwarding or tunnel is needed.
 - **Persistence (Proposed):** SQLite for durable state (Goals, Runs, Sessions, quota state, outbox, config versions). Use a library that installs without a compiler on all three platforms. Verbose agent transcripts and logs stay on disk as files referenced from SQLite.
 - **State location:** all of Preston's state and config live in Preston's own per-user data directory, never inside a Project.
 
 ### Interface and Channels
 
-- **Chat only (ADR 0001):** there is no command interface and no web UI. Channels are the terminal (opened by `preston`), Discord, Slack and WeChat. All three chat Channels ship in the first release.
+- **Chat only (ADR 0001):** there is no command interface and no web UI. Channels are the terminal (opened by `preston`), Discord and Slack. Both chat Channels ship in the first release.
 - **Who may give orders:** only the owner accounts paired during setup. Messages from anyone else are ignored and never treated as instructions.
 - **One conversation:** each Channel holds a single conversation. Preston infers which Goal a message refers to and asks only when that is genuinely ambiguous. There are no per-Goal threads.
 - **Fixed replies without a model:** the words `status`, `stop` and `pause` (exact set **Proposed**) always get a deterministic reply that does not call a model. This keeps the user able to see and stop work when the Coordinator has no quota.
 - **Questions that need the user:**
   - A question is sent to all connected Channels, and the first answer wins.
-  - Preston does not send "already answered" messages to the other Channels. On Slack and Discord it adds an emoji reaction to the question instead (reactions don't notify). On WeChat it does nothing.
+  - Preston does not send "already answered" messages to the other Channels. On Slack and Discord it adds an emoji reaction to the question instead (reactions don't notify).
 - **What Preston sends unprompted:**
   - **Always:** a short acknowledgement when it takes on a Goal, questions that need the user, and final outcomes.
   - **Only when it changes expectations:** a quota wait or agent switch that noticeably delays a Goal.
@@ -75,22 +75,12 @@ After setup the user talks to Preston from the terminal, Discord, Slack or WeCha
   - The user can adjust this in chat.
 - **Notification outbox:** every outgoing message goes through a durable outbox that records delivery state. A failed delivery never fails a Goal, and results always remain available when the user asks.
 
-### WeChat specifics
-
-- **Integration:** implement a standalone client for Tencent's WeChat ClawBot iLink protocol (HTTPS/JSON), using Tencent's MIT-licensed `openclaw-weixin` plugin as the reference. Pairing is by QR code, and only messages from the owner are accepted.
-- **Proactive sends:** send normally and accept that some may be dropped. Community reports (unverified, 2026-11-16) describe a window of about 24 hours after the user's last message and about 10 proactive messages per window. Undelivered results stay available when the user next asks.
-- **Lost login (error `-14` or equivalent):**
-  - Preston keeps working and holds outgoing messages.
-  - It raises a desktop notification on the host telling the user to run `preston`, which treats re-pairing as unfinished setup.
-- **Unsupported features:** WeChat has no reactions or message editing, so nothing is sent to mark a question answered.
-
 ### Setup conversation
 
 - **Agentic setup:** setup is a conversation with the Coordinator in the terminal, not a scripted wizard. It:
   - detects Claude Code and Codex and asks which agent(s) to use;
   - if both are available, asks whether Preston may use both, balanced by quota;
   - walks the user through creating their own Discord bot and Slack app, generating a Slack app manifest;
-  - pairs WeChat by QR code;
   - diagnoses unforeseen problems.
 - **Computer use:** a bonus where the user's agent and OS support it, never the only path. Setup must always succeed through guided steps.
 - **Secrets:** the user may paste tokens directly into the conversation, and they are stored in plain-text config. To keep that simple approach reasonably safe:
@@ -171,7 +161,7 @@ After setup the user talks to Preston from the terminal, Discord, Slack or WeCha
 
 ### Authority and safety
 
-- **Within scope:** Preston acts autonomously within the Brief's scope and the user's standing orders, and reuses the agents' native safeguards rather than adding approval prompts.
+- **Within scope:** Preston acts autonomously within the Brief's scope and the user's standing orders, and gives Workers full access with no approval prompts and no sandbox ([ADR 0003](../../docs/adr/0003-agents-run-with-full-access.md)); only the Coordinator, which reads untrusted text, is limited to Preston's tools.
 - **Escalation:** it escalates unresolved product intent, spending, wider credentials or authority, publishing, and hard-to-reverse destructive actions.
 - **Untrusted content:** repository files, web pages, Worker output and messages from non-owners are data. They never grant new authority.
 
@@ -186,10 +176,9 @@ Build in vertical slices, each proven end-to-end before the next:
 
 1. Terminal setup conversation, the terminal Channel, and one durable Goal through one agent to a Verified or Unverified outcome, surviving a Preston restart.
 2. The Discord Channel, then the Slack Channel, including guided setup.
-3. The WeChat Channel, with the live measurement test (see Human-Only Work) started alongside.
-4. Recovery from stalls, crashes and quota exhaustion, with automatic resume.
-5. Several concurrent Goals and balancing across agents.
-6. Standing orders, schedules and memory, following the original handoff's agreed design.
+3. Recovery from stalls, crashes and quota exhaustion, with automatic resume.
+4. Several concurrent Goals and balancing across agents.
+5. Standing orders, schedules and memory, following the original handoff's agreed design.
 
 All three chat Channels ship in the first public release.
 
@@ -200,8 +189,7 @@ All three chat Channels ship in the first public release.
 - The automated suite uses a **fake Worker** and a **fake Channel**, consumes no quota, and runs repeatably on macOS, Windows and Linux.
   - **Fake Worker:** can emit timed events, stall, exit unexpectedly, report quota exhaustion with or without a reset time, corrupt or lose a Session, and resume.
   - **Fake Channel:** can deliver owner and non-owner messages and record what Preston sends, including reactions and delivery failures.
-- **Real-provider smoke tests** cover a few scenarios against real Claude Code, Codex and WeChat. Each is a small Goal on a throwaway repository, including a forced quota pause and resume. They run only when deliberately invoked, never in CI.
-- **WeChat live test:** a 1–2 day test on a real account measures the proactive-message window, the per-window cap and login lifetime. The results inform WeChat messaging behaviour; they do not decide whether WeChat ships.
+- **Real-provider smoke tests** cover a few scenarios against real Claude Code, Codex. Each is a small Goal on a throwaway repository, including a forced quota pause and resume. They run only when deliberately invoked, never in CI.
 
 **Public test boundaries (Proposed)**
 
@@ -225,7 +213,6 @@ The repository has no build or test tooling yet, so verification commands are to
 
 ## Human-Only Work
 
-- **Run the WeChat live test:** pair a real WeChat account and leave it idle for 1–2 days. *Done when* the measured proactive window, per-window cap and login-expiry behaviour are recorded in the repository.
 - **Create test Channel credentials:** create a Discord bot and a Slack app in the owner's accounts for smoke testing. *Done when* both connect to a running Preston and exchange messages with the owner.
 - **Run the real-provider smoke tests:** these consume the owner's Claude or Codex quota. *Done when* the results, including the forced quota pause and resume, are recorded.
 - **Secure the npm scope:** confirm ownership of the `@polyweave` npm organisation before the first publish. No packages exist under the scope as of 2026-11-16. *Done when* the owner can publish `@polyweave/preston`.
@@ -235,7 +222,7 @@ The repository has no build or test tooling yet, so verification commands are to
 - Any command-line command interface beyond `preston`, and any web UI or dashboard.
 - Using the Claude Agent SDK with subscription logins, and handling agents' credentials.
 - Remote or multi-host execution, multi-user or multi-tenant use, and hosted or paid distribution.
-- Channels other than the terminal, Discord, Slack and WeChat. WeCom and Official Accounts are fallbacks only if personal WeChat proves unusable.
+- Channels other than the terminal, Discord and Slack.
 - Per-Goal chat threads.
 - Rebuilding agents' reasoning loops, tools, editing, memory or subagents.
 - General personal-assistant scope (email, calendar and the like). The design should not preclude it.
@@ -244,4 +231,4 @@ The repository has no build or test tooling yet, so verification commands are to
 
 ## Open Questions
 
-None block implementation. The WeChat live-test results may adjust WeChat messaging defaults but do not change scope.
+None.

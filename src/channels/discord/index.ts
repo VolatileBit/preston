@@ -3,6 +3,7 @@
  * The connection is the outbound Gateway, so the host needs no public URL.
  */
 import { PermissionFlagsBits } from "discord.js";
+import { pick } from "../../i18n/index.js";
 import {
   ChunkProgress,
   failureResult,
@@ -10,14 +11,25 @@ import {
   reconnectDelayMs,
   type SendFailure,
 } from "../shared/delivery.js";
+import { readOutboundFiles, receiveFiles, withFiles } from "../shared/files.js";
 import {
   describeDuration,
   generatePairingCode,
   type PairingWait,
   PairingWaiter,
+  pairedGreeting,
+  pairingCancelled,
+  pairingFailureDetail,
 } from "../shared/pairing.js";
-import { createRedactor, errorText, type Redactor, redactingLogger } from "../shared/secrets.js";
+import {
+  createRedactor,
+  errorText,
+  failureCause,
+  type Redactor,
+  redactingLogger,
+} from "../shared/secrets.js";
 import { splitMessage } from "../shared/text.js";
+import { TypingKeeper } from "../shared/typing.js";
 import type {
   Channel,
   ChannelContext,
@@ -58,6 +70,9 @@ export interface DiscordChannelDeps {
 /** Discord's limit for a message's content. */
 export const DISCORD_MESSAGE_LIMIT = 2000;
 
+/** What a bot can attach to one message (Discord's default limits). */
+export const DISCORD_FILE_LIMITS = { maxBytes: 25 * 1024 * 1024, maxCount: 10 } as const;
+
 /**
  * Server permissions requested by the invite. DMs, reading DMs and reacting in DMs are not
  * governed by server permissions at all; View Channels only makes the bot show up in the
@@ -80,15 +95,31 @@ export const discordSetupGuide = `Setting up Discord takes about five minutes. Y
 
 1. Open https://discord.com/developers/applications and sign in to Discord.
 2. Click "New Application", name it (for example "Preston"), accept the terms and click "Create".
-3. In the menu on the left, click "Bot". Click "Reset Token", confirm, then click "Copy".
-4. Paste the token here. Treat it like a password: anyone with it can control the bot.
-5. Preston then gives you an invite link. Open it, pick one of your servers and click "Authorize".
+3. Optional: Preston can save its logo for you to use as the app's picture (tool logo_save). Under "General Information", drop it onto "App Icon" and click "Save Changes".
+4. In the menu on the left, click "Bot". Click "Reset Token", confirm, then click "Copy".
+5. Paste the token here. Treat it like a password: anyone with it can control the bot.
+6. Preston then gives you an invite link. Open it, pick one of your servers and click "Authorize".
    No server yet? In Discord, click the "+" at the bottom of the server list, then "Create My Own".
-6. In that server, find the bot in the member list, click it, and send it the pairing code Preston shows you.
+7. In that server, find the bot in the member list, click it, and send it the pairing code Preston shows you.
 
 You don't need to turn on any of the "Privileged Gateway Intents" switches.`;
 
+export const discordSetupGuideZh = `设置 Discord 大约需要五分钟。您需要创建自己的 Discord 机器人，Preston 会通过它与您交流。
+
+1. 打开 https://discord.com/developers/applications 并登录 Discord。
+2. 点击“New Application”，起个名字（例如“Preston”），接受条款并点击“Create”。
+3. 可选：Preston 可以把它的 logo 保存下来，供您作为应用头像使用（工具 logo_save）。在“General Information”里，把图片拖到“App Icon”上，然后点击“Save Changes”。
+4. 在左侧菜单中点击“Bot”。点击“Reset Token”，确认后点击“Copy”。
+5. 把令牌粘贴到这里。请像对待密码一样对待它：任何人拿到它都能控制这个机器人。
+6. 随后 Preston 会给您一个邀请链接。打开它，选择您的一个服务器，然后点击“Authorize”。
+   还没有服务器？在 Discord 中点击服务器列表底部的“+”，再选“Create My Own”。
+7. 在该服务器的成员列表中找到机器人，点击它，并把 Preston 显示的配对码发给它。
+
+您不需要打开任何“Privileged Gateway Intents”开关。`;
+
 const ANSWERED_EMOJI = "✅";
+/** Put on the owner's message the moment Preston has read it. */
+const READ_EMOJI = "👀";
 const DEFAULT_PAIRING_TIMEOUT_MS = 15 * 60_000;
 
 interface PairingMatch {
@@ -108,6 +139,12 @@ export function createDiscordChannel(
   let ctx: ChannelContext | undefined;
   const log = redactingLogger(() => ctx?.log.bind(ctx), redact);
   const progress = new ChunkProgress();
+  const typing = new TypingKeeper(
+    async (channelId) => {
+      await transport?.sendTyping(channelId);
+    },
+    (level, message, data) => log(level, message, data),
+  );
 
   let transport: DiscordTransport | undefined;
   let identity: DiscordIdentity | undefined;
@@ -116,6 +153,7 @@ export function createDiscordChannel(
   let running = false;
   let reconnectTimer: NodeJS.Timeout | undefined;
   let reconnectAttempt = 0;
+  let inboundFiles: Promise<void> = Promise.resolve();
 
   const setStatus: ChannelContext["setStatus"] = (status, detail) => {
     if (running) ctx?.setStatus(status, detail === undefined ? undefined : redact(detail));
@@ -132,15 +170,33 @@ export function createDiscordChannel(
       return;
     }
     const text = m.content.trim();
-    if (!ctx || !running || text === "") return;
-    ctx.onMessage({
-      channel: "discord",
-      conversationId: m.channelId,
-      senderId: m.authorId,
-      isOwner: settings.ownerUserId !== undefined && m.authorId === settings.ownerUserId,
-      text,
-      ref: `${m.channelId}:${m.messageId}`,
-      receivedAt: m.createdAt.toISOString(),
+    if (!ctx || !running) return;
+    const isOwner = settings.ownerUserId !== undefined && m.authorId === settings.ownerUserId;
+    const deliver = (body: string) => {
+      if (body === "") return;
+      ctx?.onMessage({
+        channel: "discord",
+        conversationId: m.channelId,
+        senderId: m.authorId,
+        isOwner,
+        text: body,
+        ref: `${m.channelId}:${m.messageId}`,
+        receivedAt: m.createdAt.toISOString(),
+      });
+    };
+    const files = m.attachments ?? [];
+    // Only the owner's files are downloaded; anyone else's message is dropped by the Router.
+    if (files.length === 0 || !isOwner || !transport) return deliver(text);
+    const t = transport;
+    const c = ctx;
+    // Messages with files wait for their downloads, and keep their order among themselves.
+    inboundFiles = inboundFiles.then(async () => {
+      const note = await receiveFiles(files, {
+        download: (file) => t.download(file),
+        save: (name, data) => c.saveFile(name, data),
+        log: (message, data) => log("warn", message, data),
+      });
+      deliver(withFiles(text, note));
     });
   };
 
@@ -188,11 +244,18 @@ export function createDiscordChannel(
   };
 
   const authLost = (detail: string) => {
-    setStatus("needs_pairing", `${detail} Run \`preston\` to set Discord up again.`);
-    if (running)
+    setStatus(
+      "needs_pairing",
+      `${detail} ${pick({ en: "Run `preston` to set Discord up again.", "zh-CN": "请运行 `preston` 重新设置 Discord。" })}`,
+    );
+    if (running) {
       ctx?.notifyHost(
-        "Preston lost its Discord connection: the bot token stopped working. Run `preston` to fix it.",
+        pick({
+          en: "Preston lost its Discord connection: the bot token stopped working. Run `preston` to fix it.",
+          "zh-CN": "Preston 与 Discord 的连接中断：机器人令牌已失效。请运行 `preston` 修复。",
+        }),
       );
+    }
   };
 
   const connectionLost = (detail: string) => {
@@ -234,7 +297,9 @@ export function createDiscordChannel(
 
   const reportFailure = (error: unknown): DeliveryResult => {
     const failure = classifyDiscordError(error, redact);
-    log("warn", `Discord delivery failed: ${failure.detail}`);
+    log("warn", `Discord delivery failed: ${failure.detail}`, {
+      cause: failureCause(error, redact),
+    });
     if (failure.kind === "auth") {
       void dropTransport();
       authLost(failure.detail);
@@ -244,7 +309,7 @@ export function createDiscordChannel(
 
   return {
     kind: "discord",
-    capabilities: { reactions: true, proactive: "always" },
+    capabilities: { reactions: true, proactive: "always", files: DISCORD_FILE_LIMITS },
 
     async start(context) {
       ctx = context;
@@ -263,6 +328,7 @@ export function createDiscordChannel(
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
       pairing?.cancel();
+      typing.stopAll();
       await dropTransport();
       ctx?.setStatus("disconnected");
       running = false;
@@ -286,6 +352,14 @@ export function createDiscordChannel(
         };
       }
       const chunks = splitMessage(message.text, DISCORD_MESSAGE_LIMIT);
+      let files: { name: string; data: Buffer }[] | undefined;
+      if (message.files?.length) {
+        const read = readOutboundFiles(message.files, DISCORD_FILE_LIMITS.maxBytes);
+        if (!read.ok) return { status: "failed", error: read.error, retryable: false };
+        files = read.files;
+        // A message of only files has no text to carry them.
+        if (chunks.length === 0) chunks.push("");
+      }
       if (chunks.length === 0) {
         return { status: "failed", error: "The message is empty.", retryable: false };
       }
@@ -294,7 +368,12 @@ export function createDiscordChannel(
       for (let i = state.sent; i < chunks.length; i++) {
         try {
           const replyTo = i === 0 ? parseRef(message.replyTo)?.messageId : undefined;
-          const id = await transport.sendMessage(channelId, chunks[i] as string, replyTo);
+          const id = await transport.sendMessage(
+            channelId,
+            chunks[i] as string,
+            replyTo,
+            i === 0 ? files : undefined,
+          );
           state.sent = i + 1;
           state.firstRef ??= `${channelId}:${id}`;
           progress.record(key, state);
@@ -306,6 +385,21 @@ export function createDiscordChannel(
       return state.firstRef
         ? { status: "delivered", ref: state.firstRef }
         : { status: "delivered" };
+    },
+
+    async acknowledge(ref) {
+      const parsed = parseRef(ref);
+      if (!parsed || !transport) return;
+      try {
+        await transport.addReaction(parsed.channelId, parsed.messageId, READ_EMOJI);
+      } catch (error) {
+        log("debug", "Could not mark the message as read", error);
+      }
+    },
+
+    setTyping(conversationId, on) {
+      if (on) typing.start(conversationId);
+      else typing.stop(conversationId);
     },
 
     async markAnswered(ref) {
@@ -328,9 +422,15 @@ export function createDiscordChannel(
     },
 
     async pair(io: PairingIO): Promise<PairingResult> {
-      if (io.signal.aborted) return { ok: false, detail: "Pairing was cancelled." };
+      if (io.signal.aborted) return { ok: false, detail: pairingCancelled() };
       if (!settings.botToken) {
-        return { ok: false, detail: "Paste your Discord bot token first, then try pairing again." };
+        return {
+          ok: false,
+          detail: pick({
+            en: "Paste your Discord bot token first, then try pairing again.",
+            "zh-CN": "请先粘贴您的 Discord 机器人令牌，然后再尝试配对。",
+          }),
+        };
       }
       const ownsConnection = !transport;
       let id: DiscordIdentity;
@@ -342,8 +442,15 @@ export function createDiscordChannel(
           ok: false,
           detail:
             failure.kind === "auth"
-              ? 'Discord didn\'t accept that bot token. In the Developer Portal, open your application, go to "Bot", click "Reset Token" and paste the new token.'
-              : `Couldn't connect to Discord: ${failure.detail} Check the internet connection and try again.`,
+              ? pick({
+                  en: 'Discord didn\'t accept that bot token. In the Developer Portal, open your application, go to "Bot", click "Reset Token" and paste the new token.',
+                  "zh-CN":
+                    "Discord 不接受这个机器人令牌。请在开发者门户中打开您的应用，进入“Bot”，点击“Reset Token”，然后粘贴新的令牌。",
+                })
+              : pick({
+                  en: `Couldn't connect to Discord: ${failure.detail} Check the internet connection and try again.`,
+                  "zh-CN": `无法连接到 Discord：${failure.detail} 请检查网络连接后重试。`,
+                }),
         };
       }
 
@@ -354,14 +461,25 @@ export function createDiscordChannel(
         io.signal,
       );
       pairing = waiter;
+      const invite = discordInviteUrl(id.applicationId);
+      const lasts = describeDuration(pairingTimeoutMs);
       io.show(
-        [
-          "Discord accepted the bot token.",
-          `1. Invite the bot to one of your servers: ${discordInviteUrl(id.applicationId)}`,
-          "2. In that server, find the bot in the member list, click it and open a direct message.",
-          `3. Send it this pairing code: ${waiter.code}`,
-          `The code works once and expires in ${describeDuration(pairingTimeoutMs)}.`,
-        ].join("\n"),
+        pick({
+          en: [
+            "Discord accepted the bot token.",
+            `1. Invite the bot to one of your servers: ${invite}`,
+            "2. In that server, find the bot in the member list, click it and open a direct message.",
+            `3. Send it this pairing code: ${waiter.code}`,
+            `The code works once and expires in ${lasts}.`,
+          ],
+          "zh-CN": [
+            "Discord 已接受机器人令牌。",
+            `1. 邀请机器人加入您的一个服务器：${invite}`,
+            "2. 在该服务器的成员列表中找到机器人，点击它并打开私信。",
+            `3. 向它发送这个配对码：${waiter.code}`,
+            `配对码只能使用一次，${lasts}后失效。`,
+          ],
+        }).join("\n"),
       );
 
       const outcome: PairingWait<PairingMatch> = await waiter.result;
@@ -375,10 +493,7 @@ export function createDiscordChannel(
       settings.ownerUserId = outcome.match.userId;
       settings.dmChannelId = outcome.match.channelId;
       try {
-        await transport?.sendMessage(
-          outcome.match.channelId,
-          "You're paired. From now on, this is where you talk to Preston.",
-        );
+        await transport?.sendMessage(outcome.match.channelId, pairedGreeting());
       } catch (error) {
         log("warn", "Could not send the pairing confirmation on Discord", error);
       }
@@ -390,8 +505,10 @@ export function createDiscordChannel(
       }
       return {
         ok: true,
-        detail:
-          "Discord is paired with your account. Preston will talk to you in that direct message.",
+        detail: pick({
+          en: "Discord is paired with your account. Preston will talk to you in that direct message.",
+          "zh-CN": "Discord 已与您的账号配对。Preston 将在这个私信里与您交流。",
+        }),
         configPatch: {
           botToken: settings.botToken,
           ownerUserId: outcome.match.userId,
@@ -407,20 +524,6 @@ function parseRef(ref: string | undefined): { channelId: string; messageId: stri
   const [channelId, messageId, extra] = ref.split(":");
   if (!channelId || !messageId || extra !== undefined) return undefined;
   return { channelId, messageId };
-}
-
-function pairingFailureDetail(
-  status: "timeout" | "aborted" | "cancelled",
-  timeoutMs: number,
-): string {
-  switch (status) {
-    case "timeout":
-      return `No message with the pairing code arrived within ${describeDuration(timeoutMs)}, so pairing stopped. You can try again; you'll get a new code.`;
-    case "aborted":
-      return "Pairing was cancelled.";
-    case "cancelled":
-      return "Pairing was replaced by a newer attempt or Preston stopped.";
-  }
 }
 
 interface DiscordErrorShape {

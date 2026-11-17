@@ -74,7 +74,7 @@ describe("only the owner's messages can change what Preston may do", () => {
     ["config_update", { patch: { landing: { autoMergePublishing: true } } }],
     ["config_rollback", { version: 1 }],
     ["channel_configure", { kind: "discord", values: { botToken: "x".repeat(60) } }],
-    ["channel_pair", { kind: "wechat" }],
+    ["channel_pair", { kind: "slack" }],
     ["channel_remove", { kind: "discord" }],
     ["goal_land", { goalId: "g-x", allowPublishing: true }],
   ];

@@ -1,4 +1,11 @@
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -6,6 +13,7 @@ import { TerminalChannel } from "../channels/terminal.js";
 import type { Channel } from "../channels/types.js";
 import { agentKindSchema } from "../config/schema.js";
 import { ensureHome, type HomePaths, homePaths, resolveHome } from "../home.js";
+import { languageSchema } from "../i18n/index.js";
 import { IpcClient } from "../ipc/client.js";
 import { RPC_ERRORS, RpcCallError } from "../ipc/protocol.js";
 import { type IpcMethod, type IpcServer, startIpcServer } from "../ipc/server.js";
@@ -16,6 +24,7 @@ import { newSecret } from "../util/ids.js";
 import { PRESTON_VERSION } from "../version.js";
 import { type FakeScenario, fakeAdapterFactory } from "../workers/fake/index.js";
 import { type AdapterFactories, BUILTIN_ADAPTERS } from "../workers/registry.js";
+import { spawnDaemon } from "./ensure.js";
 import { AlreadyRunningError, acquireLock, processAlive } from "./lock.js";
 
 /** Test-only: a module whose default export is a FakeScenario. Never documented for users. */
@@ -55,9 +64,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       channels: [terminal, ...(options.channels ?? [])],
     });
     const rt = runtime;
+    const stopBusyUpdates = rt.onCoordinatorBusy((busy) => terminal.setBusy(busy));
     let closing: Promise<void> | undefined;
     const close = () => {
       closing ??= (async () => {
+        stopBusyUpdates();
         await server?.close();
         await rt.stop();
         lock.release();
@@ -95,12 +106,26 @@ export async function runDaemonProcess(env: NodeJS.ProcessEnv = process.env): Pr
   const exit = () => {
     void daemon.close().finally(() => process.exit(0));
   };
+  const paths = homePaths(resolveHome(env));
+  // After an update the files on disk are new: stop cleanly, then start a fresh daemon from them.
+  const restart = () => {
+    void daemon.close().finally(() => {
+      try {
+        spawnDaemon(paths, realpathSync(process.argv[1] ?? ""));
+      } catch (err) {
+        process.stderr.write(`Could not restart after updating: ${errorMessage(err)}\n`);
+      }
+      process.exit(0);
+    });
+  };
   try {
     daemon = await startDaemon({
       home: resolveHome(env),
       adapters,
       onShutdownRequest: exit,
       notifyHost: createHostNotifier(),
+      // Not in tests, which run a fake agent and must never touch npm.
+      ...(scenarioPath ? {} : { selfUpdate: { restart } }),
     });
   } catch (err) {
     if (err instanceof AlreadyRunningError) {
@@ -146,7 +171,9 @@ function daemonMethods(
     "terminal.attach": (_params, connection) => {
       const detach = terminal.attach({
         send: (message) => connection.notify("terminal.message", message),
+        busy: (busy) => connection.notify("terminal.activity", { busy }),
       });
+      if (runtime.coordinatorBusy()) connection.notify("terminal.activity", { busy: true });
       connection.onClose(detach);
       return { ok: true };
     },
@@ -161,6 +188,8 @@ function daemonMethods(
         z.object({
           agents: z.array(agentKindSchema).min(1),
           balanceByQuota: z.boolean().default(false),
+          coordinator: agentKindSchema.optional(),
+          language: languageSchema.optional(),
         }),
         params,
       );

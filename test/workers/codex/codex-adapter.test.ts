@@ -3,12 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createCodexAdapter } from "../../../src/workers/codex/index.js";
-import type {
-  ApprovalRequest,
-  RunHandle,
-  StartRunInput,
-  WorkerEvent,
-} from "../../../src/workers/types.js";
+import type { RunHandle, StartRunInput, WorkerEvent } from "../../../src/workers/types.js";
 import {
   enoent,
   FakeAppServer,
@@ -67,6 +62,7 @@ function input(overrides: Partial<StartRunInput> = {}): StartRunInput {
     runId: "run-1",
     workdir: WORKDIR,
     prompt: "Reply with the single word ok",
+    access: "full",
     ...overrides,
   };
 }
@@ -157,8 +153,7 @@ describe("startRun", () => {
     expect(start.params).toEqual({
       cwd: WORKDIR,
       approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      sandbox: "workspace-write",
+      sandbox: "danger-full-access",
       config: {
         "mcp_servers.preston": {
           command: "preston",
@@ -225,8 +220,7 @@ describe("startRun", () => {
       threadId,
       cwd: WORKDIR,
       approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      sandbox: "workspace-write",
+      sandbox: "danger-full-access",
     });
     expect(await run.sessionId()).toBe(threadId);
     // The replayed usage update for the earlier turn must not be counted.
@@ -255,9 +249,7 @@ describe("startRun", () => {
 
   test("marks activity as toolRunning while a command executes", async () => {
     const { adapter } = setup(loadFixture("turn-approval"));
-    const events = await collect(
-      adapter.startRun(input({ onApproval: async () => ({ allow: true }) })),
-    );
+    const events = await collect(adapter.startRun(input()));
 
     const activity = events.filter((e) => e.type === "activity");
     const started = activity.find((e) => e.kind === "commandExecution");
@@ -269,28 +261,21 @@ describe("startRun", () => {
   });
 });
 
-describe("approvals", () => {
-  test("asks onApproval and accepts when allowed", async () => {
-    const asked: ApprovalRequest[] = [];
-    const { adapter, server } = setup(loadFixture("turn-approval"));
-    const events = await collect(
-      adapter.startRun(
-        input({
-          onApproval: async (request) => {
-            asked.push(request);
-            return { allow: true };
-          },
-        }),
-      ),
-    );
+describe("access", () => {
+  test("a tools-only agent gets a read-only sandbox", async () => {
+    const { adapter, server } = setup(loadFixture("turn-ok"));
+    await collect(adapter.startRun(input({ access: "tools_only" })));
 
-    expect(asked).toHaveLength(1);
-    expect(asked[0]).toMatchObject({
-      kind: "command",
-      cwd: "/tmp/preston-fixture/work",
+    expect(server().requests("thread/start")[0].params).toMatchObject({
+      approvalPolicy: "on-request",
+      sandbox: "read-only",
     });
-    expect(asked[0]?.command).toContain("ls /tmp/preston-fixture/listme");
-    expect(asked[0]?.summary).toContain("test listing");
+  });
+
+  test("a full-access agent has anything it still asks for accepted", async () => {
+    const { adapter, server } = setup(loadFixture("turn-approval"));
+    const events = await collect(adapter.startRun(input()));
+
     expect(server().received).toContainEqual({ id: 0, result: { decision: "accept" } });
     expect(server().requests("turn/steer")).toEqual([]);
     expect(terminals(events)).toEqual([
@@ -298,65 +283,26 @@ describe("approvals", () => {
     ]);
   });
 
-  test("declines with the reason passed back to the agent", async () => {
+  test("a tools-only agent is declined and told why", async () => {
     const script = loadFixture("turn-approval");
     const { adapter, server } = setup(script, {
       "turn/steer": (msg, s) =>
         s.send({ id: msg.id, result: { turnId: msg.params.expectedTurnId } }),
     });
-    await collect(
-      adapter.startRun(
-        input({ onApproval: async () => ({ allow: false, reason: "outside the Project" }) }),
-      ),
-    );
+    await collect(adapter.startRun(input({ access: "tools_only" })));
 
     expect(server().received).toContainEqual({ id: 0, result: { decision: "decline" } });
     const [steer] = server().requests("turn/steer");
     expect(steer.params).toMatchObject({ threadId: threadIdOf(script) });
-    expect(steer.params.expectedTurnId).toBeTruthy();
-    expect(steer.params.input[0].text).toContain("outside the Project");
+    expect(steer.params.input[0].text).toContain("Preston's own tools only");
   });
 
-  test("declines safely when no approval handler is given", async () => {
-    const { adapter, server } = setup(loadFixture("turn-approval"));
-    await collect(adapter.startRun(input()));
-
-    expect(server().received).toContainEqual({ id: 0, result: { decision: "decline" } });
-  });
-
-  test("declines when the approval handler throws", async () => {
-    const { adapter, server } = setup(loadFixture("turn-approval"));
-    await collect(
-      adapter.startRun(
-        input({
-          onApproval: async () => {
-            throw new Error("policy unavailable");
-          },
-        }),
-      ),
-    );
-
-    expect(server().received).toContainEqual({ id: 0, result: { decision: "decline" } });
-  });
-
-  test("maps file-change and permission requests", async () => {
+  test("answers file-change and permission requests in their own shapes", async () => {
     const script = loadFixture("turn-ok");
     const threadId = threadIdOf(script);
     const turnId = script.find((e) => e.msg.method === "turn/started")?.msg.params.turn.id;
     const scope = { threadId, turnId, startedAtMs: 1 };
-    const withRequests = afterTurnStarted(script, [
-      {
-        method: "item/started",
-        params: {
-          ...scope,
-          item: {
-            type: "fileChange",
-            id: "fc1",
-            changes: [{ path: "src/a.ts" }],
-            status: "inProgress",
-          },
-        },
-      },
+    const requests = [
       {
         method: "item/fileChange/requestApproval",
         id: 7,
@@ -374,33 +320,27 @@ describe("approvals", () => {
           permissions: { network: { enabled: true }, fileSystem: null },
         },
       },
-    ]);
-    const asked: ApprovalRequest[] = [];
-    const { adapter, server } = setup(withRequests);
-    await collect(
-      adapter.startRun(
-        input({
-          onApproval: async (request) => {
-            asked.push(request);
-            return { allow: true };
-          },
-        }),
-      ),
-    );
-
-    expect(asked[0]).toMatchObject({ kind: "file_change", paths: ["src/a.ts"] });
-    expect(asked[1]).toMatchObject({ kind: "network", cwd: "/w" });
-    expect(asked[1]?.summary).toContain("network access");
-    expect(server().received).toContainEqual({ id: 7, result: { decision: "accept" } });
-    expect(server().received).toContainEqual({
+    ];
+    const full = setup(afterTurnStarted(script, requests));
+    await collect(full.adapter.startRun(input()));
+    expect(full.server().received).toContainEqual({ id: 7, result: { decision: "accept" } });
+    expect(full.server().received).toContainEqual({
       id: 8,
       result: { permissions: { network: { enabled: true } }, scope: "turn" },
+    });
+
+    const limited = setup(afterTurnStarted(script, requests));
+    await collect(limited.adapter.startRun(input({ access: "tools_only" })));
+    expect(limited.server().received).toContainEqual({ id: 7, result: { decision: "decline" } });
+    expect(limited.server().received).toContainEqual({
+      id: 8,
+      result: { permissions: {}, scope: "turn" },
     });
   });
 
   // Seen against codex-cli 0.169.0: every MCP tool call is preceded by this request, and
   // declining it made Preston's own tools (goal_create, report_result...) unusable.
-  test("allows Preston's own MCP tools and declines other servers' tools", async () => {
+  test("a tools-only agent may call Preston's own MCP tools and nothing else", async () => {
     const script = loadFixture("turn-ok");
     const threadId = threadIdOf(script);
     const turnId = script.find((e) => e.msg.method === "turn/started")?.msg.params.turn.id;
@@ -417,27 +357,25 @@ describe("approvals", () => {
         requestedSchema: { type: "object", properties: {} },
       },
     });
-    const { adapter, server } = setup(
-      afterTurnStarted(script, [
-        ask(21, "preston", "mcp_tool_call"),
-        ask(22, "other-server", "mcp_tool_call"),
-        ask(23, "preston", "something_else"),
-      ]),
-    );
-    await collect(adapter.startRun(input()));
+    const asks = [
+      ask(21, "preston", "mcp_tool_call"),
+      ask(22, "other-server", "mcp_tool_call"),
+      ask(23, "preston", "something_else"),
+    ];
+    const accept = { action: "accept", content: {}, _meta: null };
+    const decline = { action: "decline", content: null, _meta: null };
 
-    expect(server().received).toContainEqual({
-      id: 21,
-      result: { action: "accept", content: {}, _meta: null },
-    });
-    expect(server().received).toContainEqual({
-      id: 22,
-      result: { action: "decline", content: null, _meta: null },
-    });
-    expect(server().received).toContainEqual({
-      id: 23,
-      result: { action: "decline", content: null, _meta: null },
-    });
+    const limited = setup(afterTurnStarted(script, asks));
+    await collect(limited.adapter.startRun(input({ access: "tools_only" })));
+    expect(limited.server().received).toContainEqual({ id: 21, result: accept });
+    expect(limited.server().received).toContainEqual({ id: 22, result: decline });
+    expect(limited.server().received).toContainEqual({ id: 23, result: decline });
+
+    // A Worker may use every MCP server the user has set up.
+    const full = setup(afterTurnStarted(script, asks));
+    await collect(full.adapter.startRun(input()));
+    expect(full.server().received).toContainEqual({ id: 21, result: accept });
+    expect(full.server().received).toContainEqual({ id: 22, result: accept });
   });
 });
 

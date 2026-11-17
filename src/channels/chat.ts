@@ -25,12 +25,12 @@ interface Entry {
   channel: Channel;
   /** The config section the Channel was built from; a different section recreates it. */
   section: unknown;
-  /** Built for pairing before any config exists (WeChat); dropped if pairing fails. */
+  /** Built for pairing before any config exists; dropped if pairing fails. */
   provisional: boolean;
 }
 
 /**
- * The chat Channels (Discord, Slack, WeChat) built from `config.channels`. A Channel is
+ * The chat Channels (Discord, Slack) built from `config.channels`. A Channel is
  * recreated when its config section changes (config_update, rollback, channel_configure) and
  * removed when its section goes away. Changes a Channel makes itself (pairing results, cursors)
  * are saved without recreating it: config keys as a config version, `stateKeys` in

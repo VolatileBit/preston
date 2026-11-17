@@ -47,6 +47,7 @@ function runInput(overrides: Partial<StartRunInput> = {}): StartRunInput {
     runId: "run-1",
     workdir: "/work/project",
     prompt: "Reply with the single word ok",
+    access: "full",
     ...overrides,
   };
 }
@@ -110,7 +111,7 @@ describe("Claude Code adapter: runs", () => {
     expect(argValue(calls[1]?.args ?? [], "--effort")).toBe("high");
   });
 
-  test("launches Preston's MCP server with the permission prompt tool, keeping the user's servers", async () => {
+  test("launches Preston's MCP server, keeping the user's servers", async () => {
     const { adapter, calls } = adapterFor(() => ({ lines: fixtureLines("recorded-simple.jsonl") }));
     await collect(
       adapter.startRun(
@@ -126,9 +127,7 @@ describe("Claude Code adapter: runs", () => {
     );
     const call = calls[0];
     const args = call?.args ?? [];
-    expect(argValue(args, "--permission-prompt-tool")).toBe("mcp__preston__approve");
     expect(args).not.toContain("--strict-mcp-config");
-    expect(args).not.toContain("--permission-prompts");
     expect(args.join(" ")).not.toContain("t-1");
     expect(JSON.parse(call?.files["--mcp-config"] ?? "{}")).toEqual({
       mcpServers: {
@@ -145,11 +144,23 @@ describe("Claude Code adapter: runs", () => {
     );
   });
 
-  test("denies permission prompts when no MCP server is given, instead of waiting", async () => {
+  test("a Worker runs with every permission check bypassed", async () => {
     const { adapter, calls } = adapterFor(() => ({ lines: fixtureLines("recorded-simple.jsonl") }));
     await collect(adapter.startRun(runInput()));
-    expect(argValue(calls[0]?.args ?? [], "--permission-prompts")).toBe("none");
-    expect(calls[0]?.args).not.toContain("--permission-prompt-tool");
+    const args = calls[0]?.args ?? [];
+    expect(args).toContain("--dangerously-skip-permissions");
+    expect(args).not.toContain("--permission-prompts");
+    expect(args).not.toContain("--permission-prompt-tool");
+  });
+
+  test("a tools-only agent has no built-in tools, whatever the user's own rules allow", async () => {
+    const { adapter, calls } = adapterFor(() => ({ lines: fixtureLines("recorded-simple.jsonl") }));
+    await collect(adapter.startRun(runInput({ access: "tools_only" })));
+    const args = calls[0]?.args ?? [];
+    expect(args).not.toContain("--dangerously-skip-permissions");
+    expect(argValue(args, "--tools")).toBe("");
+    expect(argValue(args, "--permission-prompts")).toBe("none");
+    expect(argValue(args, "--allowedTools")).toBe("mcp__preston");
   });
 
   test("reports tool activity while a tool runs and when it finishes", async () => {

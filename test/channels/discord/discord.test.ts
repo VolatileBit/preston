@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DiscordAPIError, DiscordjsErrorCodes, HTTPError, RateLimitError } from "discord.js";
 import { describe, expect, test } from "vitest";
 import {
@@ -32,9 +35,12 @@ class FakeDiscord {
   handlers: Handlers | undefined;
   connected = false;
   connects = 0;
-  sent: Array<{ channelId: string; text: string; replyTo?: string }> = [];
+  sent: Array<{ channelId: string; text: string; replyTo?: string; files?: string[] }> = [];
+  /** Contents of the files Discord holds, by URL. */
+  held: Record<string, string> = {};
   reactions: Array<{ channelId: string; messageId: string; emoji: string }> = [];
   openedDms: string[] = [];
+  typing: string[] = [];
   connectError: (() => unknown) | undefined;
   sendErrors: unknown[] = [];
   logOnConnect: string | undefined;
@@ -58,14 +64,27 @@ class FakeDiscord {
       this.openedDms.push(userId);
       return DM;
     },
-    sendMessage: async (channelId, text, replyTo) => {
+    sendMessage: async (channelId, text, replyTo, files) => {
       const error = this.sendErrors.shift();
       if (error) throw error;
-      this.sent.push({ channelId, text, ...(replyTo ? { replyTo } : {}) });
+      this.sent.push({
+        channelId,
+        text,
+        ...(replyTo ? { replyTo } : {}),
+        ...(files ? { files: files.map((f) => `${f.name}=${f.data.toString()}`) } : {}),
+      });
       return String(this.#nextId++);
+    },
+    download: async (file) => {
+      const held = this.held[file.url];
+      if (held === undefined) throw new Error("HTTP 404");
+      return Buffer.from(held);
     },
     addReaction: async (channelId, messageId, emoji) => {
       this.reactions.push({ channelId, messageId, emoji });
+    },
+    sendTyping: async (channelId) => {
+      this.typing.push(channelId);
     },
   });
 
@@ -90,10 +109,16 @@ function fakeContext() {
   const statuses: Array<{ status: ChannelStatus; detail?: string }> = [];
   const logs: unknown[] = [];
   const notifications: string[] = [];
+  const saved = mkdtempSync(join(tmpdir(), "preston-discord-"));
   const ctx: ChannelContext = {
     onMessage: (m) => messages.push(m),
     setStatus: (status, detail) => statuses.push({ status, ...(detail ? { detail } : {}) }),
     notifyHost: (text) => notifications.push(text),
+    saveFile: async (name, data) => {
+      const path = join(saved, name);
+      writeFileSync(path, data);
+      return path;
+    },
     log: (level, message, data) => logs.push({ level, message, data }),
   };
   return { ctx, messages, statuses, logs, notifications };
@@ -428,5 +453,177 @@ describe("Discord Channel connection", () => {
   test("setup guide explains the steps with the Developer Portal link", () => {
     expect(discordSetupGuide).toContain("https://discord.com/developers/applications");
     expect(discordSetupGuide).toContain("Reset Token");
+  });
+});
+
+describe("Discord Channel files", () => {
+  const photo = (url = "https://cdn.discord/photo.png") => ({
+    name: "photo.png",
+    url,
+    size: 5,
+    mimeType: "image/png",
+  });
+  const waitFor = async (check: () => boolean) => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(check()).toBe(true);
+  };
+
+  test("the owner's attachments are kept on this computer and described to the Coordinator", async () => {
+    const { fake, channel, ctx, messages } = setup();
+    await channel.start(ctx);
+    fake.held["https://cdn.discord/photo.png"] = "PIXEL";
+    fake.dm(OWNER, "what is this?", { attachments: [photo()] });
+    await waitFor(() => messages.length === 1);
+
+    const text = messages[0]?.text ?? "";
+    expect(
+      text.startsWith("what is this?\n\n[Files the user attached, saved on this computer:\n- "),
+    ).toBe(true);
+    const path = /- (\S+photo\.png) \(image\/png, 5 B\)/.exec(text)?.[1];
+    expect(path).toBeDefined();
+    expect(readFileSync(path as string, "utf8")).toBe("PIXEL");
+  });
+
+  test("a message of only files still reaches Preston", async () => {
+    const { fake, channel, ctx, messages } = setup();
+    await channel.start(ctx);
+    fake.held["https://cdn.discord/photo.png"] = "PIXEL";
+    fake.dm(OWNER, "", { attachments: [photo()] });
+    await waitFor(() => messages.length === 1);
+    expect(messages[0]?.text).toContain("photo.png");
+  });
+
+  test("a file that cannot be downloaded is reported, not dropped", async () => {
+    const { fake, channel, ctx, messages } = setup();
+    await channel.start(ctx);
+    fake.dm(OWNER, "look", { attachments: [photo("https://cdn.discord/gone.png")] });
+    await waitFor(() => messages.length === 1);
+    expect(messages[0]?.text).toContain("photo.png could not be downloaded.");
+  });
+
+  test("an enormous file is not downloaded at all", async () => {
+    const { fake, channel, ctx, messages } = setup();
+    await channel.start(ctx);
+    fake.dm(OWNER, "big", {
+      attachments: [
+        { ...photo("https://cdn.discord/huge.mov"), name: "huge.mov", size: 500 * 1024 * 1024 },
+      ],
+    });
+    await waitFor(() => messages.length === 1);
+    expect(messages[0]?.text).toContain("huge.mov (image/png, 500.0 MB) was too large to keep.");
+  });
+
+  test("a stranger's files are never downloaded", async () => {
+    const { fake, channel, ctx, messages } = setup();
+    await channel.start(ctx);
+    let downloaded = false;
+    fake.held = new Proxy({} as Record<string, string>, {
+      get: () => {
+        downloaded = true;
+        return "x";
+      },
+    });
+    fake.dm(STRANGER, "hi", { attachments: [photo()] });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ isOwner: false, text: "hi" });
+    expect(downloaded).toBe(false);
+  });
+
+  test("files go out with the first chunk of text, and a message of only files is allowed", async () => {
+    const { fake, channel, ctx } = setup();
+    await channel.start(ctx);
+    const dir = mkdtempSync(join(tmpdir(), "preston-out-"));
+    const path = join(dir, "chart.png");
+    writeFileSync(path, "PNG!");
+
+    const result = await channel.send({
+      text: "Here it is.",
+      kind: "reply",
+      files: [{ path, name: "chart.png" }],
+    });
+    expect(result.status).toBe("delivered");
+    expect(fake.sent).toEqual([{ channelId: DM, text: "Here it is.", files: ["chart.png=PNG!"] }]);
+
+    await channel.send({ text: "", kind: "reply", files: [{ path, name: "again.png" }] });
+    expect(fake.sent[1]).toEqual({ channelId: DM, text: "", files: ["again.png=PNG!"] });
+  });
+
+  test("a missing file is a permanent failure, so the outbox does not retry it", async () => {
+    const { channel, ctx } = setup();
+    await channel.start(ctx);
+    const result = await channel.send({
+      text: "x",
+      kind: "reply",
+      files: [{ path: "/no/such/file.png", name: "file.png" }],
+    });
+    expect(result).toMatchObject({ status: "failed", retryable: false });
+  });
+
+  test("it says what it can attach", async () => {
+    const { channel } = setup();
+    expect(channel.capabilities.files).toEqual({ maxBytes: 25 * 1024 * 1024, maxCount: 10 });
+  });
+});
+
+describe("Discord file uploads through discord.js", () => {
+  test("a multipart upload works even when Slack's library is loaded in the same process", async () => {
+    // Slack's library pulls in a second copy of undici; with it loaded, discord.js's own
+    // upload code used to fail with "body must be a FormData created by this undici package".
+    await import("@slack/bolt");
+    const { REST, Routes } = await import("discord.js");
+    const { createServer } = await import("node:http");
+    const { DISCORD_REST_OPTIONS } = await import("../../../src/channels/discord/transport.js");
+    let received = "";
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        received = Buffer.concat(chunks).toString();
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ id: "1" }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    try {
+      const { port } = server.address() as { port: number };
+      const rest = new REST({
+        ...DISCORD_REST_OPTIONS,
+        api: `http://127.0.0.1:${port}/api`,
+      }).setToken("x");
+      const message = await rest.post(Routes.channelMessages("1"), {
+        body: { content: "hi" },
+        files: [{ name: "hello.txt", data: Buffer.from("Hello") }],
+      });
+      expect(message).toEqual({ id: "1" });
+      expect(received).toContain('filename="hello.txt"');
+      expect(received).toContain("Hello");
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("Discord Channel presence", () => {
+  test("a read receipt is an 👀 reaction on the owner's message", async () => {
+    const { fake, channel, ctx } = setup();
+    await channel.start(ctx);
+    await channel.acknowledge?.(`${DM}:42`);
+    expect(fake.reactions).toEqual([{ channelId: DM, messageId: "42", emoji: "👀" }]);
+  });
+
+  test("a failed read receipt is never an error", async () => {
+    const { channel, ctx } = setup();
+    await channel.start(ctx);
+    await expect(channel.acknowledge?.("not-a-ref")).resolves.toBeUndefined();
+  });
+
+  test("typing is shown straight away in the conversation and stops when asked", async () => {
+    const { fake, channel, ctx } = setup();
+    await channel.start(ctx);
+    channel.setTyping?.(DM, true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fake.typing).toEqual([DM]);
+    channel.setTyping?.(DM, false);
+    await channel.stop();
   });
 });

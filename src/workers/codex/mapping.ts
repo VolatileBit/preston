@@ -1,10 +1,4 @@
-import type {
-  ApprovalDecision,
-  ApprovalRequest,
-  ModelInfo,
-  QuotaKind,
-  QuotaReading,
-} from "../types.js";
+import type { ModelInfo, QuotaKind, QuotaReading } from "../types.js";
 import type {
   GetAccountRateLimitsResponse,
   Model,
@@ -166,151 +160,50 @@ export function toModelInfo(model: Model): ModelInfo {
   };
 }
 
-export interface NormalisedApproval {
-  request: ApprovalRequest;
-  /** The JSON-RPC result that answers the App Server for this decision. */
-  result(decision: ApprovalDecision): unknown;
+export interface ApprovalAnswer {
+  /** The JSON-RPC result that answers the App Server. */
+  result: unknown;
   /** Whether the answer itself tells the agent why it was declined (only the legacy methods). */
   carriesReason: boolean;
 }
 
-const withReason = (summary: string, reason: unknown) =>
-  typeof reason === "string" && reason ? `${summary} (reason: ${reason})` : summary;
-
-const v2Decision = (decision: ApprovalDecision) => ({
-  decision: decision.allow ? "accept" : "decline",
-});
-
-const legacyDecision = (decision: ApprovalDecision) => ({
-  decision: decision.allow ? "approved" : { denied: { rejection: decision.reason } },
-});
-
 /**
- * Turns a server→client approval request into Preston's ApprovalRequest. Returns undefined for
- * methods that are not approvals. `fileChangePaths` holds paths seen on `fileChange` items.
+ * Answers a server→client approval request. Preston starts Codex so it should not ask (full
+ * access never asks, tools-only has nothing to ask for); this keeps an unexpected ask from
+ * hanging the turn. Returns undefined for methods that are not approvals.
  */
-export function normaliseApproval(
+export function answerApproval(
   method: string,
   raw: unknown,
-  fileChangePaths: ReadonlyMap<string, string[]>,
-): NormalisedApproval | undefined {
+  allow: boolean,
+  reason: string,
+): ApprovalAnswer | undefined {
   const params = (raw ?? {}) as Record<string, unknown>;
-  const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
-
   switch (method) {
-    case "item/commandExecution/requestApproval": {
-      const command = str(params.command);
-      const cwd = str(params.cwd);
-      const network = params.networkApprovalContext as
-        | { host?: string; protocol?: string }
-        | null
-        | undefined;
-      if (network?.host) {
-        return {
-          request: {
-            kind: "network",
-            summary: withReason(`Network access to ${network.host}`, params.reason),
-            ...(command ? { command } : {}),
-            ...(cwd ? { cwd } : {}),
-          },
-          result: v2Decision,
-          carriesReason: false,
-        };
-      }
-      const summary =
-        params.kind === "writeStdin"
-          ? "Send input to a running command"
-          : `Run command: ${command ?? "(unknown)"}`;
-      return {
-        request: {
-          kind: "command",
-          summary: withReason(summary, params.reason),
-          ...(command ? { command } : {}),
-          ...(cwd ? { cwd } : {}),
-        },
-        result: v2Decision,
-        carriesReason: false,
-      };
-    }
-    case "item/fileChange/requestApproval": {
-      const grantRoot = str(params.grantRoot);
-      const paths = [...(fileChangePaths.get(String(params.itemId)) ?? [])];
-      if (grantRoot) paths.push(grantRoot);
-      const summary = grantRoot
-        ? `Allow writes under ${grantRoot}`
-        : `Apply changes to ${paths.length || "some"} file(s)`;
-      return {
-        request: { kind: "file_change", summary: withReason(summary, params.reason), paths },
-        result: v2Decision,
-        carriesReason: false,
-      };
-    }
+    case "item/commandExecution/requestApproval":
+    case "item/fileChange/requestApproval":
+      return { result: { decision: allow ? "accept" : "decline" }, carriesReason: false };
     case "item/permissions/requestApproval": {
-      const requested = (params.permissions ?? {}) as {
-        network?: { enabled?: boolean | null } | null;
-        fileSystem?: { read?: string[] | null; write?: string[] | null } | null;
-      };
-      const parts: string[] = [];
-      if (requested.network?.enabled) parts.push("network access");
-      const write = requested.fileSystem?.write ?? [];
-      const read = requested.fileSystem?.read ?? [];
-      if (write.length) parts.push(`write access to ${write.join(", ")}`);
-      if (read.length) parts.push(`read access to ${read.join(", ")}`);
-      const kind = requested.network?.enabled
-        ? "network"
-        : requested.fileSystem
-          ? "file_change"
-          : "other";
-      const cwd = str(params.cwd);
+      const requested = (params.permissions ?? {}) as { network?: unknown; fileSystem?: unknown };
       return {
-        request: {
-          kind,
-          summary: withReason(
-            `Grant additional permissions: ${parts.join("; ") || "unspecified"}`,
-            params.reason,
-          ),
-          ...(cwd ? { cwd } : {}),
-          paths: [...write, ...read],
-        },
-        result: (decision) => ({
-          permissions: decision.allow
+        result: {
+          permissions: allow
             ? {
                 ...(requested.network ? { network: requested.network } : {}),
                 ...(requested.fileSystem ? { fileSystem: requested.fileSystem } : {}),
               }
             : {},
           scope: "turn",
-        }),
+        },
         carriesReason: false,
       };
     }
-    case "execCommandApproval": {
-      const argv = Array.isArray(params.command) ? params.command.map(String) : [];
-      const command = argv.join(" ");
-      const cwd = str(params.cwd);
+    case "execCommandApproval":
+    case "applyPatchApproval":
       return {
-        request: {
-          kind: "command",
-          summary: withReason(`Run command: ${command || "(unknown)"}`, params.reason),
-          ...(command ? { command } : {}),
-          ...(cwd ? { cwd } : {}),
-        },
-        result: legacyDecision,
+        result: { decision: allow ? "approved" : { denied: { rejection: reason } } },
         carriesReason: true,
       };
-    }
-    case "applyPatchApproval": {
-      const paths = Object.keys((params.fileChanges ?? {}) as object);
-      return {
-        request: {
-          kind: "file_change",
-          summary: withReason(`Apply changes to ${paths.length} file(s)`, params.reason),
-          paths,
-        },
-        result: legacyDecision,
-        carriesReason: true,
-      };
-    }
     default:
       return undefined;
   }

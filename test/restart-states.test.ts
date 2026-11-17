@@ -33,7 +33,7 @@ describe("restarting Preston in each state of a Goal", () => {
     const p = await startPreston({ scenario: scenario(true) });
     p.owner.receive("go");
     await waitFor(() => p.rt.goals()[0]?.state === "running");
-    await waitFor(() => p.owner.texts("ack").length === 1);
+    await waitFor(() => p.owner.texts("reply").length === 1);
 
     const q = await p.restart({ scenario: scenario(false) });
     const goal = await waitFor(finishedGoal(q.rt), { what: "goal to finish" });

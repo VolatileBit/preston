@@ -1,4 +1,5 @@
 import { randomInt } from "node:crypto";
+import { pick } from "../../i18n/index.js";
 
 /** No 0/O, 1/I/L, so the code survives being read off a screen and retyped. */
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -70,7 +71,46 @@ export class PairingWaiter<T> {
 /** "15 minutes", "1 minute", "30 seconds": for plain-language timeout messages. */
 export function describeDuration(ms: number): string {
   const minutes = Math.round(ms / 60_000);
-  if (minutes >= 1) return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+  if (minutes >= 1) {
+    return pick({
+      en: minutes === 1 ? "1 minute" : `${minutes} minutes`,
+      "zh-CN": `${minutes} 分钟`,
+    });
+  }
   const seconds = Math.max(1, Math.round(ms / 1000));
-  return seconds === 1 ? "1 second" : `${seconds} seconds`;
+  return pick({
+    en: seconds === 1 ? "1 second" : `${seconds} seconds`,
+    "zh-CN": `${seconds} 秒`,
+  });
 }
+
+/** What a chat Channel says when pairing stops without a match. */
+export function pairingFailureDetail(
+  status: "timeout" | "aborted" | "cancelled",
+  timeoutMs: number,
+): string {
+  switch (status) {
+    case "timeout":
+      return pick({
+        en: `No message with the pairing code arrived within ${describeDuration(timeoutMs)}, so pairing stopped. You can try again; you'll get a new code.`,
+        "zh-CN": `${describeDuration(timeoutMs)}内没有收到带配对码的消息，配对已停止。您可以重试，会得到一个新的配对码。`,
+      });
+    case "aborted":
+      return pairingCancelled();
+    case "cancelled":
+      return pick({
+        en: "Pairing was replaced by a newer attempt or Preston stopped.",
+        "zh-CN": "配对已被新的尝试取代，或 Preston 已停止。",
+      });
+  }
+}
+
+export const pairingCancelled = () =>
+  pick({ en: "Pairing was cancelled.", "zh-CN": "配对已取消。" });
+
+/** Sent in the chat itself once the owner is paired. */
+export const pairedGreeting = () =>
+  pick({
+    en: "You're paired. From now on, this is where you talk to Preston.",
+    "zh-CN": "配对成功。从现在起，您可以在这里和 Preston 对话。",
+  });

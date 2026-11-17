@@ -1,3 +1,7 @@
+import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import type { AgentUpdater } from "../agents/updater.js";
 import type { ChatChannels } from "../channels/chat.js";
@@ -30,9 +34,18 @@ export interface SetupToolDeps {
 
 const QUOTA_READ_TIMEOUT_MS = 20_000;
 
+/** The Preston logo shipped with the package (`assets/` sits next to `src/` and `dist/`). */
+const LOGO_PATH = fileURLToPath(new URL("../../assets/logo.png", import.meta.url));
+
+/** Where the logo goes when the user names no folder: Downloads, else the home folder. */
+function defaultLogoFolder(): string {
+  const downloads = join(homedir(), "Downloads");
+  return existsSync(downloads) && statSync(downloads).isDirectory() ? downloads : homedir();
+}
+
 const kindSchema = z
   .enum(CHAT_CHANNEL_KINDS as [ChatChannelKind, ...ChatChannelKind[]])
-  .describe("discord, slack or wechat");
+  .describe("discord or slack");
 
 /** How one chat Channel stands, in words the Coordinator can pass on. */
 export function describeChannel(
@@ -74,7 +87,7 @@ export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps):
   registry.add({
     name: "channel_status",
     description:
-      "How each chat Channel (Discord, Slack, WeChat) stands: connected, connecting, disconnected, needs_pairing, invalid or not_configured, with a plain explanation, and whether a pairing is in progress.",
+      "How each chat Channel (Discord, Slack) stands: connected, connecting, disconnected, needs_pairing, invalid or not_configured, with a plain explanation, and whether a pairing is in progress.",
     roles,
     input: z.strictObject({}),
     handler: () => ({
@@ -93,9 +106,37 @@ export function registerSetupTools(registry: ToolRegistry, deps: SetupToolDeps):
   });
 
   registry.add({
+    name: "logo_save",
+    description:
+      "Save the Preston logo (a PNG, 1254x1254) to a folder on this computer and return a clickable link to it, so the user can use it as the icon of their Discord or Slack app. Defaults to the Downloads folder. Offer it when walking the user through creating the app; the link opens the image, and the file is already saved.",
+    roles,
+    input: z.strictObject({
+      folder: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("An absolute folder path; a leading ~ means the home folder"),
+    }),
+    handler: ({ folder }) => {
+      requireOwnerTurn();
+      const target = folder
+        ? resolve(folder.replace(/^~(?=$|[\\/])/, homedir()))
+        : defaultLogoFolder();
+      try {
+        mkdirSync(target, { recursive: true });
+        const file = join(target, "preston-logo.png");
+        copyFileSync(LOGO_PATH, file);
+        return { saved: file, link: pathToFileURL(file).href };
+      } catch (err) {
+        throw new ToolError(`I couldn't save the logo to ${target}: ${errorMessage(err)}`);
+      }
+    },
+  });
+
+  registry.add({
     name: "channel_configure",
     description:
-      "Store the credentials the user pasted for a Channel (Discord: botToken; Slack: botToken and appToken, both in one call). Checks their shape, saves them and starts the Channel; then call channel_pair. Never repeat a token back to the user. WeChat needs no credentials.",
+      "Store the credentials the user pasted for a Channel (Discord: botToken; Slack: botToken and appToken, both in one call). Checks their shape, saves them and starts the Channel; then call channel_pair. Never repeat a token back to the user.",
     roles,
     input: z.strictObject({
       kind: kindSchema,

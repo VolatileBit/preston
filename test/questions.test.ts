@@ -52,15 +52,15 @@ describe("questions that need the user", () => {
     const project = tempDir("project");
     const discord = new FakeChannel({ kind: "discord", reactions: true });
     const slack = new FakeChannel({ kind: "slack", reactions: true });
-    const wechat = new FakeChannel({ kind: "wechat", reactions: false });
+    const quiet = new FakeChannel({ kind: "fake", reactions: false });
     const p = await startPreston({
-      channels: [discord, slack, wechat],
+      channels: [discord, slack, quiet],
       scenario: { coordinator: relayingCoordinator(project), worker: askingWorker },
     });
 
     discord.receive("go");
-    await waitFor(() => wechat.texts("question").length > 0, { what: "question on every Channel" });
-    for (const channel of [discord, slack, wechat]) {
+    await waitFor(() => quiet.texts("question").length > 0, { what: "question on every Channel" });
+    for (const channel of [discord, slack, quiet]) {
       expect(channel.texts("question")).toEqual([
         'Preston needs your decision on "Make the greeting page say hello":\nWhich colour should the button be? I\'d suggest blue.',
       ]);
@@ -69,8 +69,8 @@ describe("questions that need the user", () => {
 
     slack.receive("Blue");
     const goal = await waitFor(finishedGoal(p.rt), { what: "goal to finish" });
-    wechat.receive("Green");
-    await waitFor(() => wechat.texts("reply").length > 0, { what: "late answer reply" });
+    quiet.receive("Green");
+    await waitFor(() => quiet.texts("reply").length > 0, { what: "late answer reply" });
 
     expect(goal).toMatchObject({ state: "completed", outcome: "verified" });
     const worker = p.fake.calls.filter((c) => c.role === "worker");
@@ -83,10 +83,10 @@ describe("questions that need the user", () => {
     const discordQuestion = discord.sent.find((m) => m.kind === "question");
     expect(discord.reactions).toEqual([discordQuestion?.ref]);
     expect(slack.reactions).toEqual([]);
-    expect(wechat.reactions).toEqual([]);
+    expect(quiet.reactions).toEqual([]);
     // Nothing else is sent to the other Channels about the answer.
-    expect(discord.sent.map((m) => m.kind)).toEqual(["ack", "reply", "question", "outcome"]);
-    expect(wechat.texts("reply")).toEqual(["That question was already answered."]);
+    expect(discord.sent.map((m) => m.kind)).toEqual(["reply", "question", "outcome"]);
+    expect(quiet.texts("reply")).toEqual(["That question was already answered."]);
   });
 
   test("a Worker gets the Coordinator's answer directly when it can answer", async () => {

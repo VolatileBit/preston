@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { expect, inject, test } from "vitest";
@@ -28,15 +27,6 @@ test("agents reach Preston's tools through the real `preston mcp` stdio server",
     },
     worker: async (turn: FakeTurn) => {
       seen.workerTools = await turn.listTools();
-      seen.allow = JSON.parse(
-        await turn.callTool("approve", {
-          tool_name: "Write",
-          input: { file_path: join(project, "a.txt"), content: "x" },
-        }),
-      );
-      seen.deny = JSON.parse(
-        await turn.callTool("approve", { tool_name: "Bash", input: { command: "git push" } }),
-      );
       seen.mcp = turn.input.mcp;
       await turn.callTool("report_result", { summary: "Done over stdio." });
       return "Done.";
@@ -56,22 +46,11 @@ test("agents reach Preston's tools through the real `preston mcp` stdio server",
   const goal = await waitFor(finishedGoal(daemon.runtime), { timeoutMs: 20_000 });
 
   expect(goal).toMatchObject({ state: "completed", outcome: "verified" });
-  expect(seen.workerTools).toEqual(["ask_preston", "report_result", "approve"]);
+  expect(seen.workerTools).toEqual(["ask_preston", "report_result"]);
   expect(seen.coordinatorTools).toEqual(
-    expect.arrayContaining([
-      "goal_create",
-      "answer_worker",
-      "ask_human",
-      "config_rollback",
-      "approve",
-    ]),
+    expect.arrayContaining(["goal_create", "answer_worker", "ask_human", "config_rollback"]),
   );
   expect(seen.coordinatorTools).not.toContain("report_result");
-  expect(seen.allow).toEqual({
-    behavior: "allow",
-    updatedInput: { file_path: join(project, "a.txt"), content: "x" },
-  });
-  expect(seen.deny).toMatchObject({ behavior: "deny" });
   expect(daemon.runtime.runs(goal.id)[0]?.report?.summary).toBe("Done over stdio.");
 
   // The Run's token was revoked when its turn ended.

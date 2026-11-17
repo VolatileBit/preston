@@ -1,14 +1,8 @@
 import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
 import path from "node:path";
 import { MCP_SERVER_NAME } from "../../mcp/names.js";
-import type {
-  ApprovalDecision,
-  RunHandle,
-  StartRunInput,
-  TokenUsage,
-  WorkerEvent,
-} from "../types.js";
-import { classifyTurnError, normaliseApproval } from "./mapping.js";
+import type { RunHandle, StartRunInput, TokenUsage, WorkerEvent } from "../types.js";
+import { answerApproval, classifyTurnError } from "./mapping.js";
 import {
   type CodexChild,
   type CodexSpawn,
@@ -135,7 +129,6 @@ class CodexRun implements RunHandle {
     | Required<Pick<TokenUsage, "inputTokens" | "outputTokens" | "cachedInputTokens">>
     | undefined;
   private readonly runningTools = new Set<string>();
-  private readonly fileChangePaths = new Map<string, string[]>();
   private readonly snapshots = new Map<string, RateLimitSnapshot>();
   private readonly early: IncomingNotification[] = [];
   private readonly session: Promise<string>;
@@ -311,10 +304,12 @@ class CodexRun implements RunHandle {
     const { model, mcp, workdir } = this.input;
     const params: Record<string, unknown> = {
       cwd: workdir,
-      // ADR 0003: keep Codex's sandbox and have its approval requests come to Preston.
+      // ADR 0003: Workers get everything the user's account can do and the adapter accepts
+      // whatever Codex still asks; the Coordinator reads untrusted text, so it gets Preston's tools
+      // and a read-only sandbox. "never" is not used: Codex then refuses MCP tool calls without
+      // asking, so Preston's own tools would be unusable (seen against codex-cli 0.169.0).
       approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      sandbox: "workspace-write",
+      sandbox: this.input.access === "full" ? "danger-full-access" : "read-only",
     };
     if (model) params.model = model;
     const developerInstructions = await this.developerInstructions(conn);
@@ -391,12 +386,6 @@ class CodexRun implements RunHandle {
         const item = p.item as ThreadItem | undefined;
         if (!item || item.type === "userMessage") return;
         if (TOOL_ITEMS.has(item.type)) this.runningTools.add(item.id);
-        if (item.type === "fileChange" && item.changes) {
-          this.fileChangePaths.set(
-            item.id,
-            item.changes.map((c) => c.path),
-          );
-        }
         const summary = describeItem(item);
         this.events.push({
           type: "activity",
@@ -519,53 +508,33 @@ class CodexRun implements RunHandle {
   private async onRequest(request: IncomingRequest): Promise<void> {
     const conn = this.conn;
     if (!conn) return;
+    const full = this.input.access === "full";
     if (request.method === "mcpServer/elicitation/request") {
-      // Codex asks before every MCP tool call ("Allow the preston MCP server to run tool X?").
-      // Preston's own tools are scoped by the token of this turn, so they are always allowed;
-      // anything else an MCP server asks of the user stays declined.
+      // Codex asks before MCP tool calls. A Worker has full access, so every tool is allowed. A
+      // tools-only agent may call Preston's own tools (scoped by this turn's token) and nothing else.
       conn.respond(
         request.id,
-        isPrestonToolCall(request.params)
+        full || isPrestonToolCall(request.params)
           ? { action: "accept", content: {}, _meta: null }
           : { action: "decline", content: null, _meta: null },
       );
       return;
     }
-    const approval = normaliseApproval(request.method, request.params, this.fileChangePaths);
-    if (!approval) {
+    const reason = "This agent may use Preston's own tools only.";
+    const answer = answerApproval(request.method, request.params, full, reason);
+    if (!answer) {
       conn.respondError(request.id, -32601, `Preston does not handle ${request.method}`);
       return;
     }
-    let decision: ApprovalDecision;
-    if (!this.input.onApproval) {
-      decision = { allow: false, reason: "Preston has no approval handler for this Run" };
-    } else {
-      try {
-        decision = await this.input.onApproval(approval.request);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        decision = { allow: false, reason: `Preston could not check this request: ${message}` };
-      }
-    }
-    conn.respond(request.id, approval.result(decision));
-    if (
-      !decision.allow &&
-      !approval.carriesReason &&
-      this.threadId &&
-      this.turnId &&
-      !this.terminal
-    ) {
+    conn.respond(request.id, answer.result);
+    if (!full && !answer.carriesReason && this.threadId && this.turnId && !this.terminal) {
       // v2 declines carry no reason, so tell the agent why within the same turn.
       conn
         .request("turn/steer", {
           threadId: this.threadId,
           expectedTurnId: this.turnId,
           input: [
-            {
-              type: "text",
-              text: `Preston declined your request (${approval.request.summary}): ${decision.reason}`,
-              text_elements: [],
-            },
+            { type: "text", text: `Preston declined your request: ${reason}`, text_elements: [] },
           ],
         })
         .catch(() => {});

@@ -130,26 +130,7 @@ export const MIGRATIONS: readonly string[] = [
     created_at TEXT NOT NULL
   );
   `,
-  // 2: Escalated approvals. Each is linked to a Worker question, which parks and resumes the Run.
-  `
-  CREATE TABLE approvals (
-    id TEXT PRIMARY KEY,
-    goal_id TEXT NOT NULL REFERENCES goals(id),
-    run_id TEXT NOT NULL REFERENCES runs(id),
-    question_id TEXT NOT NULL UNIQUE REFERENCES questions(id),
-    action TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    policy_reason TEXT NOT NULL,
-    state TEXT NOT NULL,
-    decided_by TEXT,
-    decision_reason TEXT,
-    worker_told TEXT,
-    created_at TEXT NOT NULL,
-    decided_at TEXT
-  );
-  CREATE INDEX approvals_by_state ON approvals(state);
-  `,
-  // 3: Quota buckets and their checks, supervision counters on Runs, Goal attempts and
+  // 2: Quota buckets and their checks, supervision counters on Runs, Goal attempts and
   //    idempotency keys, tracked agent processes, and durable inbound owner messages.
   `
   CREATE TABLE quota_buckets (
@@ -212,7 +193,8 @@ export const MIGRATIONS: readonly string[] = [
     UNIQUE (channel, ref)
   );
   CREATE INDEX inbound_by_state ON inbound_messages(state);
-  `, // 4: Standing orders (versioned), schedules with their run keys, and the memory search index
+  `,
+  // 3: Standing orders (versioned), schedules with their run keys, and the memory search index
   //    (the Markdown files are the source of truth; the FTS table is created in code when the
   //    SQLite build supports FTS5).
   `
@@ -275,9 +257,9 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX memory_docs_by_scope ON memory_docs(kind, scope);
   `,
-  // 5: Projects' inspected state, Goal working copies (worktrees) and landing of the work.
+  // 4: Projects' inspected state, Goal working copies (worktrees) and landing of the work.
   LANDING_MIGRATION,
-  // 6: What landing left out of a commit (generated folders, large binary files).
+  // 5: What landing left out of a commit (generated folders, large binary files).
   `
   ALTER TABLE landings ADD COLUMN left_out TEXT;
   -- Which agent a new Goal went to, and why (JSON).
@@ -289,6 +271,10 @@ export const MIGRATIONS: readonly string[] = [
     at TEXT NOT NULL
   );
   `,
-  // 7: Agent CLI versions and how keeping them current is going.
+  // 6: Agent CLI versions and how keeping them current is going.
   AGENT_CLI_MIGRATION,
+  // 7: Files sent with an outgoing message (JSON list of path and name).
+  `
+  ALTER TABLE outbox ADD COLUMN files TEXT;
+  `,
 ];

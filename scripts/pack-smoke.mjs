@@ -56,14 +56,19 @@ try {
   check(version.stderr.trim() === "", `unexpected stderr: ${version.stderr}`);
   console.log(`installed preston --version: ${version.stdout.trim()}`);
 
-  const other = spawnSync(windows ? `"${bin}"` : bin, ["help"], {
-    cwd: work,
-    encoding: "utf8",
-    shell: windows,
-  });
+  const runBin = (args) =>
+    spawnSync(windows ? `"${bin}"` : bin, args, { cwd: work, encoding: "utf8", shell: windows });
+
+  // Only `preston` and `preston stop` are commands; `-h` explains them and exits 0.
+  const help = runBin(["-h"]);
   check(
-    other.status === 2 && /no commands/.test(other.stderr),
-    "`preston help` must not be a command",
+    help.status === 0 && /^Usage: preston\b/.test(help.stdout) && help.stderr === "",
+    "`preston -h` must print the usage and exit 0",
+  );
+  const other = runBin(["help"]);
+  check(
+    other.status === 2 && /unknown command 'help'/.test(other.stderr),
+    "`preston help` must be a usage error",
   );
   console.log("pack-install smoke passed");
 } finally {

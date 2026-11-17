@@ -1,21 +1,23 @@
 import { z } from "zod";
+import { pick } from "../i18n/index.js";
 import type { Logger } from "../log.js";
 import {
   createDiscordChannel,
   type DiscordChannelDeps,
   discordSetupGuide,
+  discordSetupGuideZh,
 } from "./discord/index.js";
 import {
   createSlackChannel,
   type SlackChannelDeps,
   slackAppManifest,
   slackSetupGuide,
+  slackSetupGuideZh,
 } from "./slack/index.js";
 import type { Channel, ChannelKind } from "./types.js";
-import { createWeChatChannel, type WeChatChannelDeps, wechatSetupGuide } from "./wechat/index.js";
 
 export type ChatChannelKind = Exclude<ChannelKind, "terminal" | "fake">;
-export const CHAT_CHANNEL_KINDS: readonly ChatChannelKind[] = ["discord", "slack", "wechat"];
+export const CHAT_CHANNEL_KINDS: readonly ChatChannelKind[] = ["discord", "slack"];
 
 /** What a chat Channel factory receives. */
 export interface ChannelFactoryContext {
@@ -59,7 +61,6 @@ export interface ChatChannelSpec {
 export interface ChatChannelDeps {
   discord?: DiscordChannelDeps;
   slack?: SlackChannelDeps;
-  wechat?: Omit<WeChatChannelDeps, "persist">;
 }
 
 const id = z.string().min(1).optional();
@@ -91,7 +92,7 @@ export function chatChannelSpecs(
         },
       },
       stateKeys: [],
-      guide: () => discordSetupGuide,
+      guide: () => pick({ en: discordSetupGuide, "zh-CN": discordSetupGuideZh }),
     },
     slack: {
       label: "Slack",
@@ -117,23 +118,10 @@ export function chatChannelSpecs(
       },
       stateKeys: [],
       guide: () =>
-        `${slackSetupGuide}\n\nThe manifest to paste in step 3:\n\n${slackAppManifest()}`,
-    },
-    wechat: {
-      label: "WeChat",
-      settings: z.strictObject({
-        botToken: id,
-        botId: id,
-        ownerUserId: id,
-        baseUrl: z.url().optional(),
-        loginBaseUrl: z.url().optional(),
-        getUpdatesCursor: z.string().optional(),
-        contextTokens: z.record(z.string(), z.string()).optional(),
-      }),
-      create: (ctx) => createWeChatChannel(ctx.settings, { ...deps.wechat, persist: ctx.persist }),
-      credentials: {},
-      stateKeys: ["getUpdatesCursor", "contextTokens"],
-      guide: () => wechatSetupGuide,
+        pick({
+          en: `${slackSetupGuide}\n\nThe manifest to paste in step 3:\n\n${slackAppManifest()}`,
+          "zh-CN": `${slackSetupGuideZh}\n\n第 3 步要粘贴的 manifest：\n\n${slackAppManifest()}`,
+        }),
     },
   };
 }

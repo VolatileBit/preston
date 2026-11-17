@@ -41,7 +41,7 @@ describe("the outbox", () => {
 
     p.owner.receive("go");
     await waitFor(finishedGoal(p.rt));
-    // The failed acknowledgement holds back the later messages, so order is kept.
+    // The failed first message holds back the later ones, so order is kept.
     expect(p.owner.attempts).toBe(1);
     expect(p.owner.sent).toEqual([]);
 
@@ -52,9 +52,9 @@ describe("the outbox", () => {
     await clock.advance(1_999);
     expect(p.owner.attempts).toBe(2);
     await clock.advance(1); // second retry after 2s succeeds, then the rest follow
-    await waitFor(() => p.owner.sent.length === 3);
+    await waitFor(() => p.owner.sent.length === 2);
 
-    expect(p.owner.sent.map((m) => m.kind)).toEqual(["ack", "reply", "outcome"]);
+    expect(p.owner.sent.map((m) => m.kind)).toEqual(["reply", "outcome"]);
   });
 
   test("holds messages while a Channel is disconnected and sends them when it reconnects", async () => {

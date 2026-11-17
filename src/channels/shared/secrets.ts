@@ -69,3 +69,20 @@ export function errorText(error: unknown, redact: Redactor): string {
   const message = error instanceof Error ? error.message : String(error);
   return redact(message).slice(0, 300);
 }
+
+/**
+ * The technical cause of a failed call (error name, code, and the code of what caused it), for
+ * the log only: the plain-language `detail` shown to users hides what actually went wrong.
+ */
+export function failureCause(error: unknown, redact: Redactor): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth++) {
+    const code = (current as { code?: unknown }).code;
+    parts.push(
+      `${current.name}${code === undefined ? "" : `[${String(code)}]`}: ${current.message}`,
+    );
+    current = current.cause;
+  }
+  return redact(parts.join(" <- ")).slice(0, 500);
+}

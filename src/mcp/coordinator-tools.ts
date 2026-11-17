@@ -1,8 +1,14 @@
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { ChatChannels } from "../channels/chat.js";
 import type { ChannelHub } from "../channels/hub.js";
+import type { Outbox } from "../channels/outbox.js";
 import { isChatChannelKind } from "../channels/registry.js";
+import { formatSize } from "../channels/shared/files.js";
+import type { Clock } from "../clock.js";
 import { ConfigError, type ConfigManager, maskConfig } from "../config/config.js";
 import { type Config, workerSettings } from "../config/schema.js";
 import type { Coordinator } from "../coordinator/coordinator.js";
@@ -10,7 +16,6 @@ import { briefSchema } from "../goals/brief.js";
 import type { GoalEngine, StrategyAction } from "../goals/engine.js";
 import { describeGoalState } from "../goals/status.js";
 import type { Goal, GoalStore } from "../goals/store.js";
-import type { Approvals } from "../policy/escalations.js";
 import type { Questions } from "../questions/questions.js";
 import type { QuotaMonitor } from "../quota/monitor.js";
 import type { ModelCatalog } from "../workers/models.js";
@@ -29,7 +34,39 @@ export interface CoordinatorToolDeps {
   quota: QuotaMonitor;
   chat: ChatChannels;
   models: ModelCatalog;
-  approvals: Approvals;
+  outbox: Outbox;
+  clock: Clock;
+}
+
+/**
+ * Files from this computer to attach to a message, checked to exist and (when the Channel's
+ * limits are known) to fit. The errors are written for the Coordinator to explain to the user.
+ */
+function checkedFiles(
+  paths: string[],
+  limits: { maxBytes: number; maxCount: number } | undefined,
+): { path: string; name: string }[] {
+  if (limits && paths.length > limits.maxCount) {
+    throw new ToolError(`At most ${limits.maxCount} files fit in one message here.`);
+  }
+  return paths.map((raw) => {
+    const path = resolve(raw.replace(/^~(?=$|[\\/])/, homedir()));
+    let size: number;
+    try {
+      const stat = statSync(path);
+      if (!stat.isFile()) throw new ToolError(`${path} is not a file.`);
+      size = stat.size;
+    } catch (err) {
+      if (err instanceof ToolError) throw err;
+      throw new ToolError(`There is no file at ${path}.`);
+    }
+    if (limits && size > limits.maxBytes) {
+      throw new ToolError(
+        `${basename(path)} is ${formatSize(size)}, over the ${formatSize(limits.maxBytes)} this chat accepts. Offer to shrink it or tell the user where it is on the computer.`,
+      );
+    }
+    return { path, name: basename(path) };
+  });
 }
 
 const goalId = z.string().min(1).describe("Goal ID, e.g. g-3f9a1c0b2d");
@@ -43,9 +80,96 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
   const requireOwnerTurn = ownerTurnGuard(coordinator);
 
   registry.add({
+    name: "send_file",
+    description:
+      "Send one or more files from this computer to the user as attachments (a picture, a video, a GIF, a document), in the conversation you are answering. Use it when the user asks for a file or when a Worker produced something they should see. Give absolute paths; a leading ~ is the home folder. The caption is optional. Returns an error you can explain if the Channel cannot take the file (too big, not found).",
+    roles,
+    input: z.strictObject({
+      paths: z.array(z.string().min(1)).min(1).max(10),
+      caption: z.string().max(2000).optional(),
+    }),
+    handler: ({ paths, caption }) => {
+      requireOwnerTurn();
+      const target = coordinator.current()?.replyTo;
+      if (!target) throw new ToolError("There is no conversation to send a file to right now.");
+      const limits = deps.hub.get(target.channel)?.capabilities.files;
+      if (!limits) throw new ToolError(`${target.channel} cannot receive attachments.`);
+      if (paths.length > limits.maxCount) {
+        throw new ToolError(`At most ${limits.maxCount} files fit in one message here.`);
+      }
+      const files = checkedFiles(paths, limits);
+      deps.outbox.enqueue({
+        channel: target.channel,
+        conversationId: target.conversationId,
+        kind: "reply",
+        text: caption ?? "",
+        files,
+      });
+      return { queued: files.map((f) => f.name) };
+    },
+  });
+
+  registry.add({
+    name: "notify_user",
+    description:
+      "Speak to the user on your own initiative, in your own words: tell them a Goal ended, or anything else worth a message. With goalId, Preston's own standard message about that Goal is withdrawn (it would otherwise be sent if you stay silent), the message goes to the conversation the Goal came from, and holdUntil can delay it to a time the user chose (for example the morning, when they said they are going to sleep; an ISO time with its offset, at most 7 days ahead). paths attach files (a picture, a document). Give goalId and no text to stay silent about a Goal on purpose. Without goalId the message goes to every conversation unless you are answering one.",
+    roles,
+    input: z.strictObject({
+      goalId: goalId.optional(),
+      text: z.string().min(1).max(8000).optional(),
+      paths: z.array(z.string().min(1)).max(10).optional(),
+      holdUntil: z.iso.datetime({ offset: true }).optional(),
+    }),
+    handler: ({ goalId: forGoal, text, paths, holdUntil }) => {
+      if (!text && !forGoal) {
+        throw new ToolError("Give the text to send, or a goalId to stay silent about on purpose.");
+      }
+      if (!text && paths?.length) throw new ToolError("Files need a message to go with.");
+      const now = deps.clock.now();
+      let holdUntilMs: number | undefined;
+      if (holdUntil) {
+        holdUntilMs = Date.parse(holdUntil);
+        if (holdUntilMs - now > 7 * 24 * 3_600_000) {
+          throw new ToolError("holdUntil is more than 7 days ahead; choose a nearer time.");
+        }
+        if (holdUntilMs <= now) holdUntilMs = undefined;
+      }
+      const goal = forGoal ? store.findGoal(forGoal) : undefined;
+      if (forGoal && !goal) throw new ToolError(`There is no Goal ${forGoal}.`);
+      const target = goal?.origin ?? coordinator.current()?.replyTo;
+      const limits = target ? deps.hub.get(target.channel)?.capabilities.files : undefined;
+      const files = paths?.length ? checkedFiles(paths, limits) : undefined;
+      // Whatever Preston itself would have said about the Goal is replaced by this.
+      const withdrawn = forGoal ? deps.outbox.cancelOutcome(forGoal) : 0;
+      if (!text) return { silent: true, withdrawn };
+      const item = {
+        kind: "notice" as const,
+        text,
+        goalId: forGoal,
+        files,
+        holdUntilMs,
+      };
+      if (target) {
+        deps.outbox.enqueue({
+          ...item,
+          channel: target.channel,
+          conversationId: target.conversationId,
+        });
+      } else {
+        deps.outbox.broadcast(item);
+      }
+      return {
+        queued: true,
+        ...(holdUntilMs ? { heldUntil: new Date(holdUntilMs).toISOString() } : {}),
+        withdrawn,
+      };
+    },
+  });
+
+  registry.add({
     name: "goal_create",
     description:
-      "Create a Goal in a Project folder and start a Worker on it. Preston acknowledges it to the user itself.",
+      "Create a Goal in a Project folder and start a Worker on it. You answer the user about it yourself; when it ends you are asked to tell them (notify_user).",
     roles,
     input: z.strictObject({
       projectPath: z.string().min(1).describe("Absolute path of the Project folder"),
@@ -195,12 +319,6 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
     roles,
     input: z.strictObject({ questionId: z.string().min(1), answer: z.string().min(1).max(8000) }),
     handler: ({ questionId, answer }) => {
-      const approval = deps.approvals.byQuestion(questionId);
-      if (approval) {
-        throw new ToolError(
-          `Question ${questionId} is approval ${approval.id}: record the decision with approval_decide.`,
-        );
-      }
       const result = questions.answer(questionId, answer, coordinator.current()?.replyTo?.channel);
       if (!result.ok) throw new ToolError(result.reason);
       return { questionId, state: result.question.state };
@@ -323,34 +441,6 @@ export function registerCoordinatorTools(registry: ToolRegistry, deps: Coordinat
         if (err instanceof ConfigError) throw new ToolError(err.message);
         throw err;
       }
-    },
-  });
-
-  registry.add({
-    name: "approval_decide",
-    description:
-      "Decide an escalated approval (a Worker asked to do something Preston's policy does not allow on its own). Allow only when the Brief's authority clearly covers it, or the user said yes. A Worker still waiting gets the answer at once; otherwise Preston resumes it with the decision.",
-    roles,
-    input: z.strictObject({
-      approvalId: z.string().min(1).describe("The approval ID (a-…), or its question ID (q-…)"),
-      allow: z.boolean(),
-      reason: z.string().min(1).max(1000).describe("Short reason, shown to the Worker"),
-    }),
-    handler: ({ approvalId, allow, reason }) => {
-      const approval = deps.approvals.find(approvalId) ?? deps.approvals.byQuestion(approvalId);
-      if (!approval) throw new ToolError(`There is no approval ${approvalId}.`);
-      const invocation = coordinator.current();
-      const waitingForUser = questions.find(approval.questionId)?.state === "pending_human";
-      if (waitingForUser && invocation?.input.kind !== "message") {
-        throw new ToolError(
-          `Approval ${approval.id} is waiting for the user. Record their answer when they reply.`,
-        );
-      }
-      const decided = deps.approvals.decide(approval.id, allow, reason, {
-        decidedBy: waitingForUser ? "human" : "coordinator",
-        via: invocation?.replyTo?.channel,
-      });
-      return { approvalId: decided.id, state: decided.state };
     },
   });
 }

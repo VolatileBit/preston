@@ -1,9 +1,12 @@
+import { pathToFileURL } from "node:url";
 import { newId } from "../util/ids.js";
 import type { Channel, ChannelContext, DeliveryResult, OutboundMessage } from "./types.js";
 
 /** One attached `preston` terminal client, as seen by the daemon. */
 export interface TerminalClient {
   send(message: { kind: OutboundMessage["kind"]; text: string }): void;
+  /** Preston's own agent started or stopped thinking. */
+  busy?(busy: boolean): void;
 }
 
 export const TERMINAL_CONVERSATION = "terminal";
@@ -15,7 +18,12 @@ export const TERMINAL_CONVERSATION = "terminal";
  */
 export class TerminalChannel implements Channel {
   readonly kind = "terminal" as const;
-  readonly capabilities = { reactions: false, proactive: "always" } as const;
+  // Files are shown as links on this same computer, so there is no real size limit.
+  readonly capabilities = {
+    reactions: false,
+    proactive: "always",
+    files: { maxBytes: Number.MAX_SAFE_INTEGER, maxCount: 20 },
+  } as const;
   private ctx: ChannelContext | undefined;
   private clients = new Set<TerminalClient>();
 
@@ -39,6 +47,11 @@ export class TerminalChannel implements Channel {
     };
   }
 
+  /** Tells every attached client whether Preston is thinking. */
+  setBusy(busy: boolean): void {
+    for (const client of this.clients) client.busy?.(busy);
+  }
+
   /** A line the owner typed in a terminal client. */
   receive(text: string): void {
     this.ctx?.onMessage({
@@ -56,7 +69,9 @@ export class TerminalChannel implements Channel {
     if (this.clients.size === 0) {
       return { status: "failed", error: "No terminal is open", retryable: true };
     }
-    for (const client of this.clients) client.send({ kind: message.kind, text: message.text });
+    const links = (message.files ?? []).map((f) => `${f.name}: ${pathToFileURL(f.path).href}`);
+    const text = [message.text, ...links].filter(Boolean).join("\n");
+    for (const client of this.clients) client.send({ kind: message.kind, text });
     return { status: "delivered", ref: newId("t") };
   }
 

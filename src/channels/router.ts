@@ -6,10 +6,18 @@ export type FixedWord = "status" | "stop" | "pause" | "resume";
 
 const FIXED_WORDS: readonly FixedWord[] = ["status", "stop", "pause", "resume"];
 
+/** Chinese equivalents, always accepted whatever language Preston speaks. */
+const CHINESE_WORDS: Record<string, FixedWord> = {
+  状态: "status",
+  停止: "stop",
+  暂停: "pause",
+  继续: "resume",
+};
+
 /** The whole message, ignoring case and surrounding whitespace, is one of the fixed words. */
 export function fixedWord(text: string): FixedWord | undefined {
   const word = text.trim().toLowerCase();
-  return FIXED_WORDS.find((w) => w === word);
+  return FIXED_WORDS.find((w) => w === word) ?? CHINESE_WORDS[word];
 }
 
 export interface RouterDeps {
@@ -17,6 +25,8 @@ export interface RouterDeps {
   log: Logger;
   /** Deterministic replies; these must never call a model. */
   fixed: Record<FixedWord, () => string>;
+  /** Shows the owner their message was read (a reaction); best effort, never throws. */
+  acknowledge?(message: InboundMessage): void;
   /** Everything else from the owner. */
   toCoordinator(message: InboundMessage): void;
   /**
@@ -42,6 +52,8 @@ export class Router {
       return;
     }
     const word = fixedWord(message.text);
+    // Read receipt first, before any thinking: the owner sees it at once.
+    this.deps.acknowledge?.(message);
     if (!word) {
       if (this.deps.intercept?.(message)) return;
       this.deps.toCoordinator(message);

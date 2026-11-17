@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import type { Outbox } from "../channels/outbox.js";
 import { type Clock, isoNow, type Timer } from "../clock.js";
 import type { ConfigManager } from "../config/config.js";
+import { pick } from "../i18n/index.js";
 import { errorMessage, type Logger } from "../log.js";
 import { formatResetTime } from "../quota/time.js";
 import { all, type Db, one, recordEvent, run } from "../store/db.js";
@@ -295,8 +296,16 @@ export class AgentUpdater {
     after: AgentDetection,
     label: string,
   ): void {
-    const problem = after.problem ?? `${label} did not start or says you are signed out.`;
-    const reason = `${label} stopped working after an update. ${problem} I have not changed anything else and I will not undo the update myself.`;
+    const problem =
+      after.problem ??
+      pick({
+        en: `${label} did not start or says you are signed out.`,
+        "zh-CN": `${label} 无法启动，或提示您已退出登录。`,
+      });
+    const reason = pick({
+      en: `${label} stopped working after an update. ${problem} I have not changed anything else and I will not undo the update myself.`,
+      "zh-CN": `${label} 在更新后无法正常工作。${problem} 我没有改动其他任何东西，也不会自己撤销这次更新。`,
+    });
     this.deps.log.warn("agent needs attention after update", { agent, from, to, problem });
     this.save(agent, {
       version: to ?? from,
@@ -320,7 +329,10 @@ export class AgentUpdater {
     if (!before || !after || before === after) return;
     this.deps.outbox.broadcast({
       kind: "notice",
-      text: `I updated ${agentLabel(agent)} to ${to}, a new major version. Work carries on as normal; tell me if anything seems different.`,
+      text: pick({
+        en: `I updated ${agentLabel(agent)} to ${to}, a new major version. Work carries on as normal; tell me if anything seems different.`,
+        "zh-CN": `我把 ${agentLabel(agent)} 更新到了 ${to}（一个新的大版本）。工作照常进行；如果觉得有什么不同，请告诉我。`,
+      }),
       dedupeKey: `agent-major:${agent}:${to}`,
     });
   }

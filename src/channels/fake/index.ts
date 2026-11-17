@@ -13,6 +13,8 @@ export interface FakeChannelOptions {
   kind?: ChannelKind;
   reactions?: boolean;
   proactive?: ChannelCapabilities["proactive"];
+  /** The largest attachment this fake accepts. Default 1 MB. */
+  maxFileBytes?: number;
 }
 
 export interface SentMessage extends OutboundMessage {
@@ -31,11 +33,16 @@ export class FakeChannel implements Channel {
   readonly sent: SentMessage[] = [];
   /** Refs passed to `markAnswered`. */
   readonly reactions: string[] = [];
+  /** Refs of the owner's messages Preston marked as read. */
+  readonly acknowledged: string[] = [];
+  /** Every `setTyping` call, in order. */
+  readonly typing: { conversationId: string; typing: boolean }[] = [];
   /** Delivery attempts, including failed ones. */
   attempts = 0;
   private ctx: ChannelContext | undefined;
   private failures: Failure[] = [];
   private failAll: Failure | undefined;
+  private failWithFiles: Failure | undefined;
   private seq = 0;
   /** Native refs are unique across instances, as a real service's are across restarts. */
   private readonly tag = randomBytes(3).toString("hex");
@@ -45,6 +52,7 @@ export class FakeChannel implements Channel {
     this.capabilities = {
       reactions: options.reactions ?? true,
       proactive: options.proactive ?? "always",
+      files: { maxBytes: options.maxFileBytes ?? 1024 * 1024, maxCount: 10 },
     };
   }
 
@@ -89,8 +97,14 @@ export class FakeChannel implements Channel {
     this.failAll = failure;
   }
 
+  /** Fail every delivery that carries files (the service refuses uploads), until `stopFailing`. */
+  failFiles(failure: Failure = { error: "uploads are down", retryable: true }): void {
+    this.failWithFiles = failure;
+  }
+
   stopFailing(): void {
     this.failAll = undefined;
+    this.failWithFiles = undefined;
     this.failures = [];
   }
 
@@ -100,11 +114,22 @@ export class FakeChannel implements Channel {
 
   async send(message: OutboundMessage): Promise<DeliveryResult> {
     this.attempts++;
-    const failure = this.failAll ?? this.failures.shift();
+    const failure =
+      this.failAll ??
+      (message.files?.length ? this.failWithFiles : undefined) ??
+      this.failures.shift();
     if (failure) return { status: "failed", ...failure };
     const ref = `${this.kind}-out-${++this.seq}`;
     this.sent.push({ ...message, ref });
     return { status: "delivered", ref };
+  }
+
+  async acknowledge(ref: string): Promise<void> {
+    this.acknowledged.push(ref);
+  }
+
+  setTyping(conversationId: string, typing: boolean): void {
+    this.typing.push({ conversationId, typing });
   }
 
   async markAnswered(ref: string): Promise<void> {

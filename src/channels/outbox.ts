@@ -1,10 +1,11 @@
 import type { Clock, Timer } from "../clock.js";
 import { isoNow } from "../clock.js";
 import type { Config } from "../config/schema.js";
+import { pick } from "../i18n/index.js";
 import { errorMessage, type Logger } from "../log.js";
 import { all, type Db, one, run } from "../store/db.js";
 import type { ChannelHub } from "./hub.js";
-import type { ChannelKind, DeliveryResult, OutboundKind } from "./types.js";
+import type { ChannelKind, DeliveryResult, OutboundFile, OutboundKind } from "./types.js";
 
 export interface OutboxItem {
   channel: ChannelKind;
@@ -14,9 +15,16 @@ export interface OutboxItem {
   replyTo?: string | undefined;
   goalId?: string | undefined;
   questionId?: string | undefined;
+  /** Files to send with the text (the text may then be empty). */
+  files?: OutboundFile[] | undefined;
+  /** Do not deliver before this time (ms since the epoch): a message held on purpose. */
+  holdUntilMs?: number | undefined;
   /** Enqueuing the same key twice delivers once, including across restarts. */
   dedupeKey?: string | undefined;
 }
+
+/** After this many failed tries a message's files are dropped and its text goes alone. */
+const FILE_FALLBACK_ATTEMPTS = 3;
 
 interface OutboxRow {
   id: number;
@@ -25,6 +33,7 @@ interface OutboxRow {
   kind: OutboundKind;
   text: string;
   reply_to: string | null;
+  files: string | null;
   attempts: number;
   next_attempt_at: string;
 }
@@ -68,8 +77,8 @@ export class Outbox {
     const at = isoNow(this.clock);
     const changes = run(
       this.db,
-      `INSERT OR IGNORE INTO outbox (dedupe_key, channel, conversation_id, kind, text, reply_to, goal_id, question_id, state, next_attempt_at, created_at)
-       VALUES (:key, :channel, :conversation, :kind, :text, :replyTo, :goal, :question, 'pending', :at, :at)`,
+      `INSERT OR IGNORE INTO outbox (dedupe_key, channel, conversation_id, kind, text, reply_to, goal_id, question_id, files, state, next_attempt_at, created_at)
+       VALUES (:key, :channel, :conversation, :kind, :text, :replyTo, :goal, :question, :files, 'pending', :due, :at)`,
       {
         key: item.dedupeKey ?? null,
         channel: item.channel,
@@ -79,7 +88,9 @@ export class Outbox {
         replyTo: item.replyTo ?? null,
         goal: item.goalId ?? null,
         question: item.questionId ?? null,
+        files: item.files?.length ? JSON.stringify(item.files) : null,
         at,
+        due: item.holdUntilMs === undefined ? at : new Date(item.holdUntilMs).toISOString(),
       },
     );
     if (changes > 0) this.kick();
@@ -95,6 +106,18 @@ export class Outbox {
         dedupeKey: item.dedupeKey ? `${item.dedupeKey}:${channel}` : undefined,
       });
     }
+  }
+
+  /**
+   * Withdraws a Goal's own standard outcome message that has not been sent yet (the Coordinator
+   * told the user in its own words). Returns how many were withdrawn.
+   */
+  cancelOutcome(goalId: string): number {
+    return run(
+      this.db,
+      "UPDATE outbox SET state = 'cancelled' WHERE goal_id = :g AND kind = 'outcome' AND state = 'pending' AND attempts = 0",
+      { g: goalId },
+    );
   }
 
   /** Withdraws undelivered copies of a question (it was answered elsewhere). */
@@ -144,7 +167,9 @@ export class Outbox {
     for (const item of due) {
       if (this.stopped) return;
       if (blocked.has(item.channel)) continue;
-      // Preserve order per Channel: a waiting item holds back the ones after it.
+      // A message held on purpose (not tried yet) waits without holding anything back.
+      if (item.next_attempt_at > now && item.attempts === 0) continue;
+      // Preserve order per Channel: a retry waiting for its backoff holds back the ones after it.
       if (item.next_attempt_at > now || !this.hub.isConnected(item.channel)) {
         blocked.add(item.channel);
         continue;
@@ -166,6 +191,7 @@ export class Outbox {
           text: item.text,
           kind: item.kind,
           replyTo: item.reply_to ?? undefined,
+          ...(item.files ? { files: JSON.parse(item.files) as OutboundFile[] } : {}),
         });
       } catch (err) {
         result = { status: "failed", error: errorMessage(err), retryable: true };
@@ -182,6 +208,12 @@ export class Outbox {
     const settings = this.settings();
     const attempts = item.attempts + 1;
     const giveUp = !result.retryable || attempts >= settings.maxAttempts;
+    // A file that will not go must not hold back the messages behind it, or leave the user
+    // hearing nothing: send the text with a note instead, right away.
+    if (item.files && (giveUp || attempts >= FILE_FALLBACK_ATTEMPTS)) {
+      this.dropFiles(item, result.error);
+      return false;
+    }
     const delay =
       result.retryAfterMs ??
       Math.min(settings.baseDelayMs * 2 ** (attempts - 1), settings.maxDelayMs);
@@ -205,6 +237,33 @@ export class Outbox {
       gaveUp: giveUp,
     });
     return false;
+  }
+
+  /** Replaces an item's files by a note that they could not be sent, and retries it at once. */
+  private dropFiles(item: OutboxRow, error: string): void {
+    const names = (JSON.parse(item.files ?? "[]") as OutboundFile[]).map((f) => f.name).join(", ");
+    const note = pick({
+      en: `(I couldn't send ${names}: ${error} It is still on your computer.)`,
+      "zh-CN": `（我没能发送 ${names}：${error} 文件仍在您的电脑上。）`,
+    });
+    run(
+      this.db,
+      `UPDATE outbox SET files = NULL, text = :text, attempts = :attempts, last_error = :error, next_attempt_at = :at
+       WHERE id = :id AND state = 'pending'`,
+      {
+        id: item.id,
+        text: item.text ? `${item.text}\n\n${note}` : note,
+        attempts: item.attempts + 1,
+        error,
+        at: isoNow(this.clock),
+      },
+    );
+    this.log.warn("could not send files; sending the text without them", {
+      id: item.id,
+      channel: item.channel,
+      error,
+    });
+    this.again = true;
   }
 
   private scheduleNext(): void {

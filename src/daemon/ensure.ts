@@ -8,14 +8,11 @@ import { IpcClient } from "../ipc/client.js";
 const START_TIMEOUT_MS = 20_000;
 const POLL_MS = 150;
 
-/**
- * Connects to the daemon, starting it in the background first if it is not running.
- * The daemon is detached, so it keeps running after this client exits.
- */
-export async function connectToDaemon(paths: HomePaths, cliPath: string): Promise<IpcClient> {
-  const existing = await tryConnect(paths);
-  if (existing) return existing;
-
+/** Starts a detached daemon process running `cliPath`; it outlives the caller. */
+export function spawnDaemon(
+  paths: HomePaths,
+  cliPath: string,
+): { exited: () => number | null | undefined; outputPath: string } {
   ensureHome(paths);
   const outputPath = join(paths.logs, "daemon.out");
   const output = openSync(outputPath, "a", 0o600);
@@ -35,14 +32,42 @@ export async function connectToDaemon(paths: HomePaths, cliPath: string): Promis
     exited = code;
   });
   child.unref();
+  return { exited: () => exited, outputPath };
+}
 
+/** Asks a running daemon to shut down and waits until it no longer answers. */
+export async function stopDaemon(paths: HomePaths, timeoutMs = 15_000): Promise<boolean> {
+  const client = await tryConnect(paths);
+  if (!client) return true;
+  await client.request("shutdown").catch(() => {});
+  client.close();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await delay(POLL_MS);
+    const again = await tryConnect(paths);
+    if (!again) return true;
+    again.close();
+  }
+  return false;
+}
+
+/**
+ * Connects to the daemon, starting it in the background first if it is not running.
+ * The daemon is detached, so it keeps running after this client exits.
+ */
+export async function connectToDaemon(paths: HomePaths, cliPath: string): Promise<IpcClient> {
+  const existing = await tryConnect(paths);
+  if (existing) return existing;
+
+  const { exited, outputPath } = spawnDaemon(paths, cliPath);
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await delay(POLL_MS);
     const client = await tryConnect(paths);
     if (client) return client;
     // A non-zero exit means it failed; zero means another instance won the race.
-    if (exited !== undefined && exited !== 0) break;
+    const code = exited();
+    if (code !== undefined && code !== 0) break;
   }
   throw new Error(`Preston's background service did not start.\n${tail(outputPath)}`);
 }

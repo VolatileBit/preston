@@ -50,15 +50,13 @@ export interface McpLaunchSpec {
   env?: Record<string, string>;
 }
 
-export interface ApprovalRequest {
-  kind: "command" | "file_change" | "network" | "other";
-  summary: string;
-  command?: string;
-  cwd?: string;
-  paths?: string[];
-}
-
-export type ApprovalDecision = { allow: true } | { allow: false; reason: string };
+/**
+ * What an agent may do on the machine.
+ * - `full`: everything the user's own account can do, with no sandbox and no permission prompts
+ *   (Workers, ADR 0003).
+ * - `tools_only`: nothing but Preston's own MCP tools (the Coordinator, which reads untrusted text).
+ */
+export type AgentAccess = "full" | "tools_only";
 
 export interface StartRunInput {
   /** Preston's Run ID, for logging and MCP token scoping. */
@@ -75,11 +73,7 @@ export interface StartRunInput {
   effort?: string;
   /** Preston's MCP server for this Run. */
   mcp?: McpLaunchSpec;
-  /**
-   * Answers native approval requests delivered through the adapter's protocol (Codex App Server).
-   * Claude Code routes approvals through the MCP server's permission tool instead (ADR 0003).
-   */
-  onApproval?: (request: ApprovalRequest) => Promise<ApprovalDecision>;
+  access: AgentAccess;
   /** Where the adapter writes the raw transcript/log for this invocation. */
   transcriptPath?: string;
 }

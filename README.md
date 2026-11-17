@@ -19,6 +19,19 @@ You talk to Preston only through chat. There are no commands to learn.
 npm i -g @polyweave/preston
 ```
 
+## Commands
+
+There are only two: `preston` opens the conversation (and starts the background service if needed), and `preston stop` stops the background service. Work in progress is saved and picks up the next time Preston starts. `preston -h` shows the usage. If you work on Preston itself, `npm run build` keeps `dist/cli.js` executable, so an `npm link` keeps working after a rebuild.
+
+## Updates
+
+Preston keeps itself current. Each time you run `preston`, and every six hours in the background, it asks npm for a newer version. When there is one:
+
+- `preston` installs it, restarts the background service and carries on with the new version.
+- The background service installs it only while nothing is running (no Goal in progress), restarts itself, and tells you in chat.
+
+It only updates a copy installed with `npm i -g`. A development checkout, a project install, `npx` or another package manager's copy is left alone, and Preston tells you the command to update by hand. If an install fails (usually npm's folder permissions), it explains why, keeps running the current version, and tries that version again after a day. Your Goals, settings and history carry over. To turn this off, tell Preston to set `selfUpdate.enabled` to false, or run `npm i -g @polyweave/preston@latest` yourself whenever you like.
+
 ## Run
 
 ```sh
@@ -29,13 +42,26 @@ The first time, Preston starts its background service, sets it to start by itsel
 
 - **Discord**: you create your own Discord bot and paste its token. You need a Discord server to add the bot to; you can create one for free.
 - **Slack**: Preston gives you a ready-made app manifest to paste into Slack's "Create an app" page, then asks for the two tokens Slack shows you.
-- **WeChat**: Preston shows a QR code; scan it with WeChat on your phone.
+
+If you have both Claude Code and Codex and let Preston use both, setup also asks which of them should do Preston's own thinking (understanding you and planning). Codex is offered first and is the default (just press Enter); choose Claude Code if you prefer it. You can change it later by telling Preston. Preston's own thinking is separate from the work itself, which is shared between the agents by quota.
+
+Preston asks which language you want the first time you run it: English or Simplified Chinese (简体中文). Everything it says to you follows that choice, including the setup steps, and the words `状态`, `停止`, `暂停` and `继续` work like `status`, `stop`, `pause` and `resume`. To change it later, just tell Preston.
+
+You can send Preston pictures, videos, GIFs and other files in Discord or Slack, and ask it to send files back (for example "send me hello.txt"). Files you send are saved under `~/.preston/attachments` and handed to a coding agent that can open them; Preston itself only reads the message and the file list. Preston can send any file on your computer when you ask, up to 25 MB on Discord and 100 MB on Slack; anything bigger it tells you the location of instead. Emoji and GIF links in your messages arrive as plain text.
+
+Preston speaks with one voice: when you give it a Goal, it answers you itself, and when the Goal ends it tells you in its own words, in the language you write in, with any files attached. Tell it how you want to be reached ("I'm going to sleep, let's chat tomorrow morning") and it holds the messages until then. If Preston's own agent is unavailable when a Goal ends, a plain standard message is sent after three minutes instead, so you are never left without a result.
+
+If you ask for something to be made (a picture, a document, a chart), Preston hands it to a coding agent and sends you the file with the result. What can be made is whatever your Claude Code or Codex can do on your computer: drawing with code and installed tools, or an image tool if your agent has one. Preston has no image model of its own.
+
+Slack apps created before this feature need the `files:read` and `files:write` permissions added under "OAuth & Permissions", then a reinstall, or files will not work there.
+
+While Preston is thinking, the terminal shows a spinner with a changing message, so you can tell it is working. During Discord or Slack setup it can also save its logo to your Downloads folder, ready to use as your app's picture.
 
 Any of them, or none: the terminal always works. Each one is paired with your own account, and only you can give Preston instructions there.
 
-After that, `preston` opens a conversation with Preston. Tell it what you want done. Press Ctrl+C to leave; Preston keeps working in the background. Run `preston` again to pick up where you left off, including anything left unfinished, such as scanning a new WeChat code when WeChat ended Preston's login.
+After that, `preston` opens a conversation with Preston. Tell it what you want done. Press Ctrl+C to leave; Preston keeps working in the background. Run `preston` again to pick up where you left off, including anything left unfinished.
 
-You can always type `status`, `stop`, `pause` or `resume`. Preston answers these straight away, even when its own agent has run out of quota. If Preston loses a chat connection, such as its WeChat login, it shows a notification on your computer.
+You can always type `status`, `stop`, `pause` or `resume`. Preston answers these straight away, even when its own agent has run out of quota. If Preston loses a chat connection, such as a revoked bot token, it shows a notification on your computer.
 
 ## What happens to the finished work
 

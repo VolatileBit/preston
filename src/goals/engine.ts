@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type { Outbox } from "../channels/outbox.js";
+import type { OutboundFile } from "../channels/types.js";
 import { type Clock, isoNow, type Timer } from "../clock.js";
 import type { ConfigManager } from "../config/config.js";
 import { workerSettings } from "../config/schema.js";
@@ -8,9 +9,6 @@ import type { LandingHooks } from "../landing/hooks.js";
 import { canonicalPath } from "../landing/paths.js";
 import { errorMessage, type Logger } from "../log.js";
 import { type Tokens, ToolError } from "../mcp/tools.js";
-import { decide, nativeAction } from "../policy/approvals.js";
-import type { PolicyAction } from "../policy/policy.js";
-import { evaluate } from "../policy/policy.js";
 import {
   answerPrompt,
   briefChangedPrompt,
@@ -36,7 +34,6 @@ import { type RunHealth, runHealth, type StallEvidence, StallWatch } from "../su
 import { agentLabel } from "../workers/registry.js";
 import type {
   AgentKind,
-  ApprovalDecision,
   McpLaunchSpec,
   RunHandle,
   WorkerAdapter,
@@ -46,7 +43,6 @@ import { type AgentChoice, selectAgent } from "./agents.js";
 import { type Brief, renderBrief } from "./brief.js";
 import { type CheckResult, runCheck } from "./checks.js";
 import {
-  ackMessage,
   blockedMessage,
   failedChecksEvidence,
   failedMessage,
@@ -74,6 +70,22 @@ export interface GoalEvent {
   goalId: string;
   runId: string;
   detail: string;
+}
+
+/** What the Coordinator is told when a Goal ends, so it can tell the user in its own words. */
+export interface GoalOutcome {
+  goalId: string;
+  runId: string;
+  state: "completed" | "blocked" | "failed";
+  outcome: "verified" | "unverified" | undefined;
+  /** Why it did not complete (blocked or failed). */
+  detail: string | undefined;
+  /** What the Worker reported; untrusted text. */
+  summary: string | undefined;
+  /** Files the Worker handed in for the user that exist. */
+  deliverables: string[];
+  /** What Preston itself would say, sent if the Coordinator does not. */
+  standardMessage: string;
 }
 
 export type StrategyAction =
@@ -104,12 +116,8 @@ export interface EngineDeps {
   raiseWorkerQuestion(question: Question): void;
   /** Asks the Coordinator how a stuck Goal should continue. */
   raiseGoalEvent(event: GoalEvent): void;
-  /** Decides an action the policy escalated (Coordinator or user, bounded wait). */
-  escalateApproval?(
-    run: { runId: string; goalId: string },
-    action: PolicyAction,
-    policyReason: string,
-  ): Promise<ApprovalDecision>;
+  /** Asks the Coordinator to tell the user a Goal ended (see `outcomes.coordinatorWaitMs`). */
+  raiseGoalOutcome(outcome: GoalOutcome): void;
 }
 
 type TurnEnd = Extract<
@@ -167,8 +175,6 @@ export class GoalEngine {
     sourceKey?: string | undefined;
     /** The agent to start on (see `chooseAgent`); without it Preston chooses from what it knows. */
     agent?: AgentChoice | undefined;
-    /** Skip the acknowledgement (routine scheduled work says nothing until it has an outcome). */
-    quiet?: boolean | undefined;
     /** Called inside the creating transaction, before the first Run starts. */
     onCreated?: ((goal: Goal) => void) | undefined;
   }): Goal {
@@ -187,7 +193,7 @@ export class GoalEngine {
       if (existing) return existing;
     }
     const agent = input.agent ?? this.chooseAgentNow(projectPath);
-    const { store, db, outbox, clock } = this.deps;
+    const { store, db, clock } = this.deps;
     const goal = transaction(db, () => {
       const projectId = store.ensureProject(projectPath);
       const created = store.createGoal({
@@ -200,14 +206,8 @@ export class GoalEngine {
       });
       recordEvent(db, clock, "goal_created", { goalId: created.id }, { ...agent });
       input.onCreated?.(created);
-      const ack = { kind: "ack" as const, text: ackMessage(created), goalId: created.id };
-      if (input.quiet) {
-        // No acknowledgement.
-      } else if (input.origin) {
-        outbox.enqueue({ ...ack, ...input.origin, dedupeKey: `ack:${created.id}` });
-      } else {
-        outbox.broadcast({ ...ack, dedupeKey: `ack:${created.id}` });
-      }
+      // No acknowledgement of Preston's own: the Coordinator answers the message that made the
+      // Goal, and a scheduled Goal says nothing until it has an outcome.
       return created;
     });
     this.startNewRun(goal.id, agent.agent);
@@ -334,32 +334,6 @@ export class GoalEngine {
         suggested: report.suggestedVerificationCommands.length,
       },
     );
-  }
-
-  /**
-   * Answers an agent's native approval request with the deterministic policy (ADR 0003).
-   * Escalations go to `escalateApproval` when provided, otherwise they are declined.
-   */
-  async approve(runId: string, action: PolicyAction): Promise<ApprovalDecision> {
-    const run = this.deps.store.run(runId);
-    const { decision, policy } = decide(action, { workdir: run.workdir });
-    if (policy.verdict === "escalate" && this.deps.escalateApproval) {
-      return this.deps.escalateApproval({ runId, goalId: run.goalId }, action, policy.reason);
-    }
-    if (policy.verdict === "escalate") {
-      recordEvent(
-        this.deps.db,
-        this.deps.clock,
-        "approval_escalated",
-        { goalId: run.goalId, runId },
-        {
-          action,
-          reason: policy.reason,
-        },
-      );
-      this.deps.log.info("approval denied pending escalation", { runId, reason: policy.reason });
-    }
-    return decision;
   }
 
   /**
@@ -642,7 +616,7 @@ export class GoalEngine {
         model: settings.model,
         effort: settings.effort,
         mcp: this.deps.mcpLaunch(token),
-        onApproval: async (request) => this.approve(runId, nativeAction(request)),
+        access: "full",
         transcriptPath: join(run.transcriptDir, `turn-${turn}.log`),
       });
       this.live.set(runId, handle);
@@ -1218,7 +1192,7 @@ export class GoalEngine {
     }
     const checks = [
       ...goal.brief.checks.map((c) => ({ ...c, source: "brief" as const })),
-      ...acceptedSuggestions(report, goal.brief, run.workdir),
+      ...acceptedSuggestions(report, goal.brief),
     ];
     if (checks.length === 0) {
       this.complete(goal, run, [], report);
@@ -1379,6 +1353,7 @@ export class GoalEngine {
   ): void {
     const { db, store, questions, outbox, clock } = this.deps;
     const outcome = result.state === "completed" ? result.outcome : undefined;
+    let handoff = false;
     transaction(db, () => {
       store.updateRun(run.id, {
         state: "ended",
@@ -1401,14 +1376,32 @@ export class GoalEngine {
           outcome,
         },
       );
+      const files = result.state === "completed" ? deliverableFiles(run.report) : undefined;
+      const waitMs = this.deps.config.get().outcomes.coordinatorWaitMs;
+      handoff = waitMs > 0;
       outbox.broadcast({
         kind: "outcome",
         text: result.message,
         goalId: goal.id,
+        files,
+        // With the Coordinator asked to speak first, this is only the fallback.
+        holdUntilMs: handoff ? clock.now() + waitMs : undefined,
         // Per Run: a Goal merged again after being held back reports a new outcome.
         dedupeKey: `outcome:${goal.id}:${run.id}`,
       });
     });
+    if (handoff) {
+      this.deps.raiseGoalOutcome({
+        goalId: goal.id,
+        runId: run.id,
+        state: result.state,
+        outcome,
+        detail: result.state === "completed" ? undefined : result.detail,
+        summary: run.report?.summary,
+        deliverables: (deliverableFiles(run.report) ?? []).map((f) => f.path),
+        standardMessage: result.message,
+      });
+    }
     this.deps.log.info("goal finished", { goalId: goal.id, state: result.state, outcome });
   }
 
@@ -1512,15 +1505,31 @@ function isTurnEnd(event: WorkerEvent): event is TurnEnd {
   );
 }
 
-/** Worker-suggested commands Preston will also run: only routine ones the policy allows. */
-function acceptedSuggestions(report: WorkerReport | null, brief: Brief, workdir: string) {
+/** Worker-suggested commands Preston also runs, next to the Brief's checks. */
+/** The files a Worker handed in for the user that exist, once each, named as the user will see them. */
+function deliverableFiles(report: WorkerReport | null): OutboundFile[] | undefined {
+  const files: OutboundFile[] = [];
+  const seen = new Set<string>();
+  for (const raw of report?.deliverables ?? []) {
+    const path = resolve(raw);
+    try {
+      if (seen.has(path) || !statSync(path).isFile()) continue;
+    } catch {
+      continue;
+    }
+    seen.add(path);
+    files.push({ path, name: basename(path) });
+  }
+  return files.length ? files : undefined;
+}
+
+function acceptedSuggestions(report: WorkerReport | null, brief: Brief) {
   const known = new Set(brief.checks.map((c) => c.command.trim()));
   const accepted: { name: string; command: string; source: "suggested" }[] = [];
   for (const raw of report?.suggestedVerificationCommands ?? []) {
     const command = raw.trim();
     if (!command || known.has(command)) continue;
     known.add(command);
-    if (evaluate({ kind: "command", command }, { workdir }).verdict !== "allow") continue;
     accepted.push({ name: `suggested: ${command}`, command, source: "suggested" });
     if (accepted.length >= MAX_SUGGESTED_CHECKS) break;
   }

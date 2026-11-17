@@ -16,6 +16,10 @@ export interface HomePaths {
   transcripts: string;
   /** Working directory of the Coordinator's agent Session. */
   coordinator: string;
+  /** Files the user sent through a chat Channel. */
+  attachments: string;
+  /** A Project folder for one-off requests that belong to no real project (a picture, an answer). */
+  scratch: string;
 }
 
 export function resolveHome(env: NodeJS.ProcessEnv = process.env): string {
@@ -34,12 +38,21 @@ export function homePaths(root: string): HomePaths {
     logs: join(root, "logs"),
     transcripts: join(root, "transcripts"),
     coordinator: join(root, "coordinator"),
+    attachments: join(root, "attachments"),
+    scratch: join(root, "scratch"),
   };
 }
 
 /** Creates the home directory tree, readable only by the owner. */
 export function ensureHome(paths: HomePaths): void {
-  for (const dir of [paths.root, paths.logs, paths.transcripts, paths.coordinator]) {
+  for (const dir of [
+    paths.root,
+    paths.logs,
+    paths.transcripts,
+    paths.coordinator,
+    paths.attachments,
+    paths.scratch,
+  ]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   // The modes above apply only to folders just created, and the home may predate them.
