@@ -158,6 +158,14 @@ export const configSchema = z.strictObject({
       checkIntervalMs: ms(6 * 60 * MINUTE),
     })
     .prefault({}),
+  review: z
+    .strictObject({
+      /** Look back over finished work now and then and suggest improvements (never applied unasked). */
+      enabled: z.boolean().default(true),
+      /** How often Preston looks back, and how far back each look goes. */
+      intervalMs: ms(24 * 60 * MINUTE),
+    })
+    .prefault({}),
   setup: z
     .strictObject({
       /** Set by the Coordinator once the setup conversation has nothing left to do. */

@@ -177,6 +177,15 @@ export class Questions {
     ).map(toQuestion);
   }
 
+  /** Questions a Worker asked since a time (ISO), oldest first. */
+  askedSince(sinceIso: string): Question[] {
+    return all<QuestionRow>(
+      this.deps.db,
+      "SELECT * FROM questions WHERE asked_by = 'worker' AND created_at >= :since ORDER BY created_at, rowid",
+      { since: sinceIso },
+    ).map(toQuestion);
+  }
+
   /** Open questions and answers not yet delivered, for one Run. */
   forRun(runId: string): { open: Question[]; undelivered: Question[] } {
     const rows = all<QuestionRow>(

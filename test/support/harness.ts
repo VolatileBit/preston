@@ -42,6 +42,7 @@ export const TEST_CONFIG: ConfigPatch = {
   outbox: { baseDelayMs: 1_000, maxDelayMs: 4_000, maxAttempts: 5 },
   // Tests that are not about the Coordinator speaking get Preston's own outcome message at once.
   outcomes: { coordinatorWaitMs: 0 },
+  review: { enabled: false },
   setup: { complete: true },
 };
 

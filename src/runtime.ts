@@ -32,6 +32,7 @@ import { registerMemoryTools } from "./memory/tools.js";
 import { type Question, Questions } from "./questions/questions.js";
 import { QuotaMonitor } from "./quota/monitor.js";
 import { type Bucket, QuotaStore } from "./quota/store.js";
+import { Reviewer } from "./review/reviewer.js";
 import { Scheduler } from "./schedule/service.js";
 import { ScheduleStore } from "./schedule/store.js";
 import { registerScheduleTools } from "./schedule/tools.js";
@@ -284,6 +285,20 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
         restart: selfUpdate.restart,
       })
     : undefined;
+  const reviewer = new Reviewer({
+    clock,
+    log: log.child("review"),
+    config,
+    paths,
+    source: (since) => ({
+      goals: store.listGoals({ finishedLimit: 500 }),
+      runs: (goalId) => store.runsForGoal(goalId),
+      verifications: (goalId) => store.verifications(goalId),
+      questions: questions.askedSince(new Date(since).toISOString()),
+    }),
+    raise: (review) => coordinator.submit({ kind: "review", ...review }),
+    isIdle: () => !coordinator.isBusy(),
+  });
   const scheduleStore = new ScheduleStore(db, clock);
   const landing = new Landing({
     db,
@@ -367,6 +382,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     models,
     outbox,
     clock,
+    review: reviewer,
   });
   registerLandingTools(tools, { landing });
   const requireOwnerTurn = ownerTurnGuard(coordinator);
@@ -508,12 +524,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
       // After recovery: Runs recovered above count as using their CLI, so updates wait for them.
       updater.start();
       selfUpdater?.start();
+      reviewer.start();
     },
     async stop() {
       log.info("preston stopping");
       stopTyping();
       updater.stop();
       selfUpdater?.stop();
+      reviewer.stop();
       quota.stop();
       await scheduler.stop();
       await landing.stop();

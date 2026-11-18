@@ -555,6 +555,7 @@ function queueKey(input: CoordinatorInput): string | undefined {
   if (input.kind === "message" && input.inboundId !== undefined) return `m:${input.inboundId}`;
   if (input.kind === "goal_event") return `e:${input.runId}`;
   if (input.kind === "goal_outcome") return `o:${input.runId}`;
+  if (input.kind === "review") return `r:${input.digest.until}`;
   return undefined;
 }
 
@@ -571,6 +572,7 @@ function replyTarget(input: CoordinatorInput): ReplyTarget | undefined {
     case "worker_question":
     case "goal_event":
     case "goal_outcome":
+    case "review":
       return undefined;
   }
 }
